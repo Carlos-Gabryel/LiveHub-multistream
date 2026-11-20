@@ -21,9 +21,10 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 #include "vendor/obs-websocket-api.h"
 #include "saidas.h"
+#include "dock.hpp"
 
 #define LHMS_VENDOR_NAME "livehub-multistream"
-#define LHMS_API_VERSION 3
+#define LHMS_API_VERSION 4
 #define LHMS_WS_MIN_API 2 /* obs-websocket API version with vendor requests */
 #define LHMS_OBS_MIN_VERSION MAKE_SEMANTIC_VERSION(31, 1, 0)
 
@@ -33,7 +34,8 @@ OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 static obs_websocket_vendor s_vendor;
 static bool lhms_ativo = false;
 
-static const char *const s_requests[] = {"status", "saidas.definir", "saidas.status", "saida.ligar"};
+static const char *const s_requests[] = {"status",      "saidas.definir", "saidas.status",
+					 "saida.ligar", "saida.iniciar",  "saida.parar"};
 
 static void emitir_evento(const char *event_name, obs_data_t *event_data)
 {
@@ -57,6 +59,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	case OBS_FRONTEND_EVENT_EXIT: {
 		/* Stop every extra output before unregistering. */
 		saidas_parar_tudo();
+		saidas_amostrador_parar();
 		obs_websocket_vendor vendor = s_vendor;
 		s_vendor = NULL;
 		if (vendor)
@@ -115,6 +118,36 @@ static void request_saida_ligar(obs_data_t *request_data, obs_data_t *response_d
 	saidas_req_ligar(request_data, response_data);
 }
 
+static void request_saida_iniciar_parar(obs_data_t *request_data, obs_data_t *response_data, bool iniciar)
+{
+	const char *erro = "";
+	const char *id = obs_data_get_string(request_data, "id");
+	bool ok = iniciar ? saidas_iniciar_manual(id, &erro) : saidas_parar_manual(id, &erro);
+	obs_data_set_bool(response_data, "ok", ok);
+	if (!ok)
+		obs_data_set_string(response_data, "erro", erro);
+}
+
+static void request_saida_iniciar(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	UNUSED_PARAMETER(priv_data);
+	if (!lhms_ativo) {
+		obs_data_set_bool(response_data, "success", false);
+		return;
+	}
+	request_saida_iniciar_parar(request_data, response_data, true);
+}
+
+static void request_saida_parar(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	UNUSED_PARAMETER(priv_data);
+	if (!lhms_ativo) {
+		obs_data_set_bool(response_data, "success", false);
+		return;
+	}
+	request_saida_iniciar_parar(request_data, response_data, false);
+}
+
 const char *obs_module_name(void)
 {
 	return "LiveHub Multistream";
@@ -128,7 +161,8 @@ const char *obs_module_description(void)
 bool obs_module_load(void)
 {
 	if (obs_get_version() < LHMS_OBS_MIN_VERSION) {
-		obs_log(LOG_WARNING, "OBS %s is too old: LiveHub Multistream requires OBS 31.1.0 or newer; plugin disabled",
+		obs_log(LOG_WARNING,
+			"OBS %s is too old: LiveHub Multistream requires OBS 31.1.0 or newer; plugin disabled",
 			obs_get_version_string());
 		return false;
 	}
@@ -147,6 +181,7 @@ void obs_module_post_load(void)
 	/* Extra outputs work even without obs-websocket (config is loaded from disk). */
 	saidas_carregar();
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
+	lhms_dock_registrar(); /* post_load runs on the Qt UI thread */
 
 	/* Vendor registration must happen after obs-websocket has loaded. */
 	if (obs_websocket_get_api_version() < LHMS_WS_MIN_API) {
@@ -164,7 +199,9 @@ void obs_module_post_load(void)
 	bool ok = obs_websocket_vendor_register_request(vendor, "status", request_status, NULL) &&
 		  obs_websocket_vendor_register_request(vendor, "saidas.definir", request_saidas_definir, NULL) &&
 		  obs_websocket_vendor_register_request(vendor, "saidas.status", request_saidas_status, NULL) &&
-		  obs_websocket_vendor_register_request(vendor, "saida.ligar", request_saida_ligar, NULL);
+		  obs_websocket_vendor_register_request(vendor, "saida.ligar", request_saida_ligar, NULL) &&
+		  obs_websocket_vendor_register_request(vendor, "saida.iniciar", request_saida_iniciar, NULL) &&
+		  obs_websocket_vendor_register_request(vendor, "saida.parar", request_saida_parar, NULL);
 	if (!ok) {
 		obs_log(LOG_WARNING, "failed to register vendor requests");
 		for (size_t i = 0; i < sizeof(s_requests) / sizeof(s_requests[0]); i++)
@@ -178,6 +215,7 @@ void obs_module_post_load(void)
 void obs_module_unload(void)
 {
 	/* Do not touch obs-websocket here: it may already be unloaded. */
+	lhms_dock_remover();
 	obs_frontend_remove_event_callback(on_frontend_event, NULL);
 	lhms_ativo = false;
 	saidas_liberar();

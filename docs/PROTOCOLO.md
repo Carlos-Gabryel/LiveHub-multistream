@@ -9,7 +9,7 @@ O plugin registra no obs-websocket (v5) o vendor **`livehub-multistream`**. Os c
 
 A resposta chega em `responseData.responseData`. Para receber os eventos do vendor, o cliente precisa assinar `EventSubscription::Vendors` (`1 << 9` = 512).
 
-**Versão da API: 3** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio`, `modo_encoder` e `encoder_proprio`/`modo_encoder` no `saidas.status`).
+**Versão da API: 4** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio`, `modo_encoder` e `encoder_proprio`/`modo_encoder` no `saidas.status`).
 
 **API 4** (painel do OBS): adiciona `saida.iniciar`/`saida.parar`, o campo `kbps` em cada saída do `saidas.status` e o bloco `principal`.
 
@@ -23,7 +23,7 @@ Request: `{"id": "youtube"}`. Liga ou para **agora** só essa saída. Não muda 
 - Respostas: `{"ok": true}`, `{"ok": false, "erro": "id_desconhecido"}` ou `{"ok": false, "erro": "sem_encoder"}`.
 
 ### `status`
-Resposta: `{"plugin_versao": "0.3.0", "obs_versao": "33.0.1", "api": 3}`
+Resposta: `{"plugin_versao": "0.4.0", "obs_versao": "33.0.1", "api": 4}`
 
 ### `saidas.definir`
 Substitui a lista inteira de saídas extras e grava em `obs_module_config_path("saidas.json")`. O plugin continua funcionando sem o LiveHub aberto.
@@ -58,7 +58,7 @@ Resposta (**nunca inclui a key**):
 - `erro`: `""` | `key_invalida` | `falha_conexao` | `desconectado` | `sem_encoder` | `multitrack` | `outro`.
 - `desde`: momento (unix, em segundos) em que a saída entrou `ao_vivo`. Fica `0` fora do ar.
 - `kbps` (API 4): bitrate de saída atual, calculado pelo plugin com média dos últimos ~3 s. Fica `0` fora do ar.
-- `principal` (API 4): `{"plataforma": "twitch"|"youtube"|"kick"|"", "ao_vivo": bool, "kbps": int, "quadros_perdidos": int}`. A plataforma é detectada pelo serviço de transmissão do OBS: `rtmp_common` pelo nome do serviço, ou `rtmp_custom` pelo host do servidor; vazio se não reconhecer.
+- `principal` (API 4): `{"plataforma": "twitch"|"youtube"|"kick"|"", "ao_vivo": bool, "kbps": int, "quadros_perdidos": int}`. A plataforma é detectada pelo serviço de transmissão do OBS: `rtmp_common` pelo nome do serviço, ou `rtmp_custom` pelo host do servidor; vazio se não reconhecer. No `rtmp_custom`, hosts `global-contribute.live-video.net` contam como `kick`.
 
 ### `saida.ligar`
 Request: `{"id": "kick", "ativo": false}`. Liga ou desliga uma saída e grava a mudança. Com a principal no ar, inicia ou para só essa saída.

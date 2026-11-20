@@ -8,6 +8,8 @@ Fase 1: saidas extras (por exemplo YouTube e Kick) que reaproveitam o encoder da
 
 Fase 1.1 (API 3): com Enhanced Broadcasting (multitrack) nao ha encoder simples para compartilhar, entao as extras usam um codificador proprio do plugin (encoder e bitrate configuraveis via `bitrate_proprio` e `encoder_proprio`).
 
+Painel do OBS (API 4): o plugin registra o dock "LiveHub Multistream" (menu Docks), que mostra a transmissao principal e cada saida extra com estado, kbps e quadros perdidos, upload total e o codificador em uso, e permite iniciar/parar cada saida na hora (`saida.iniciar`/`saida.parar`). Sem a principal no ar, a saida iniciada a mao usa o codificador proprio; quando a principal para, todas as extras param. O bitrate vem de um amostrador interno (a cada 1 s) e tambem aparece no `saidas.status` (`kbps` e bloco `principal`).
+
 ## Licenca
 
 GPLv2 ou posterior.

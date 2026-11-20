@@ -34,6 +34,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
+#include <ctype.h>
 #include "saidas.h"
 
 #define MAX_SAIDAS 8
@@ -43,10 +45,28 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #define MAX_KEY 300
 
 enum estado { E_PARADO, E_CONECTANDO, E_AO_VIVO, E_RECONECTANDO, E_ERRO };
-enum erro { ERR_NENHUM, ERR_KEY_INVALIDA, ERR_FALHA_CONEXAO, ERR_DESCONECTADO, ERR_SEM_ENCODER, ERR_MULTITRACK, ERR_OUTRO };
+enum erro {
+	ERR_NENHUM,
+	ERR_KEY_INVALIDA,
+	ERR_FALHA_CONEXAO,
+	ERR_DESCONECTADO,
+	ERR_SEM_ENCODER,
+	ERR_MULTITRACK,
+	ERR_OUTRO
+};
 
 static const char *estado_str[] = {"parado", "conectando", "ao_vivo", "reconectando", "erro"};
-static const char *erro_str[] = {"", "key_invalida", "falha_conexao", "desconectado", "sem_encoder", "multitrack", "outro"};
+static const char *erro_str[] = {"",           "key_invalida", "falha_conexao", "desconectado", "sem_encoder",
+				 "multitrack", "outro"};
+
+#define N_AMOSTRAS 3
+
+/* Last N_AMOSTRAS (time, total bytes) samples of an output; protected by lock. */
+struct amostrador {
+	uint64_t t[N_AMOSTRAS];
+	uint64_t b[N_AMOSTRAS];
+	int n;
+};
 
 struct saida {
 	bool usada;
@@ -62,6 +82,10 @@ struct saida {
 	enum estado estado;
 	enum erro erro;
 	long long desde;
+
+	struct amostrador am;
+	obs_output_t *am_out; /* output the samples belong to (compared by address only) */
+	int kbps;
 };
 
 #define MAX_ENC_ID 64
@@ -78,7 +102,7 @@ static int s_enc_refs = 0;
 static char s_enc_em_uso[MAX_ENC_ID] = "";
 
 static const char *const s_auto_encoders[] = {"obs_nvenc_h264_tex", "jim_nvenc", "h264_texture_amf",
-					      "obs_qsv11_v2",       "obs_qsv11",  "obs_x264"};
+					      "obs_qsv11_v2",       "obs_qsv11", "obs_x264"};
 
 static struct saida s_saidas[MAX_SAIDAS];
 static pthread_mutex_t s_lock;
@@ -88,6 +112,14 @@ static bool s_principal_on = false;
 static bool s_multitrack = false;
 static bool s_modo_proprio = false; /* modo_encoder: false = "auto", true = "proprio". Protected by lock. */
 static saidas_emit_fn s_emit = NULL;
+
+/* Main output sampling + sampler thread. */
+static struct amostrador s_am_principal;
+static int s_principal_kbps = 0;
+static int s_principal_perdidos = 0;
+static pthread_t s_thr;
+static os_event_t *s_stop_ev = NULL;
+static bool s_thr_ok = false;
 
 /* ---------- helpers ---------- */
 
@@ -286,8 +318,9 @@ void saidas_carregar(void)
 		return;
 
 	{
-		long long br = obs_data_has_user_value(raiz, "bitrate_proprio") ? obs_data_get_int(raiz, "bitrate_proprio")
-										: BITRATE_PADRAO;
+		long long br = obs_data_has_user_value(raiz, "bitrate_proprio")
+				       ? obs_data_get_int(raiz, "bitrate_proprio")
+				       : BITRATE_PADRAO;
 		const char *enc = obs_data_get_string(raiz, "encoder_proprio");
 		pthread_mutex_lock(&s_lock);
 		s_modo_proprio = strcmp(obs_data_get_string(raiz, "modo_encoder"), "proprio") == 0;
@@ -462,7 +495,8 @@ static bool obter_proprios(struct saida *s, obs_encoder_t **venc, obs_encoder_t 
 			obs_encoder_release(v);
 		if (a)
 			obs_encoder_release(a);
-		obs_log(LOG_WARNING, "own encoders: could not create encoder pair (video=%s)", *pedido ? pedido : "auto");
+		obs_log(LOG_WARNING, "own encoders: could not create encoder pair (video=%s)",
+			*pedido ? pedido : "auto");
 		return false;
 	}
 
@@ -536,21 +570,24 @@ static void derrubar(int i, enum estado estado, enum erro erro)
 	mudar_estado(s, NULL, estado, erro, false);
 }
 
-static void iniciar_slot(int i)
+/* Starts slot i. manual=true ignores "ativo" and works with the main output off (then it uses the own encoders).
+ * Returns NULL on success (or when there is nothing to do) or an error reason. Caller holds op_lock. */
+static const char *iniciar_slot(int i, bool manual)
 {
 	struct saida *s = &s_saidas[i];
 	char id[MAX_ID + 1], servidor[MAX_SERVIDOR + 1], key[MAX_KEY + 1];
 	bool precisa_limpar = false;
 
 	pthread_mutex_lock(&s_lock);
-	if (!s->usada || !s->ativo || !s_principal_on) {
+	if (!s->usada || (!manual && (!s->ativo || !s_principal_on))) {
 		pthread_mutex_unlock(&s_lock);
-		return;
+		return manual ? "id_desconhecido" : NULL;
 	}
+	bool principal_on = s_principal_on;
 	if (s->out) {
 		if (s->estado != E_ERRO) {
 			pthread_mutex_unlock(&s_lock);
-			return; /* already running */
+			return NULL; /* already running */
 		}
 		precisa_limpar = true;
 	}
@@ -565,29 +602,37 @@ static void iniciar_slot(int i)
 	char host[MAX_SERVIDOR + 1];
 	host_de(servidor, host, sizeof(host));
 
-	obs_output_t *principal = obs_frontend_get_streaming_output();
-	obs_encoder_t *venc = principal ? obs_output_get_video_encoder(principal) : NULL;
-	obs_encoder_t *aenc = principal ? obs_output_get_audio_encoder(principal, 0) : NULL;
-	if (principal)
-		obs_output_release(principal);
+	obs_encoder_t *venc = NULL;
+	obs_encoder_t *aenc = NULL;
+	if (principal_on) {
+		obs_output_t *principal = obs_frontend_get_streaming_output();
+		venc = principal ? obs_output_get_video_encoder(principal) : NULL;
+		aenc = principal ? obs_output_get_audio_encoder(principal, 0) : NULL;
+		if (principal)
+			obs_output_release(principal);
+	}
 
 	pthread_mutex_lock(&s_lock);
 	bool modo_proprio = s_modo_proprio;
-	if (!venc)
+	if (principal_on && !venc)
 		s_multitrack = true; /* s_multitrack always reflects the main output */
 	pthread_mutex_unlock(&s_lock);
 
 	if (!venc || modo_proprio) {
-		/* Multitrack main output (e.g. Twitch Enhanced Broadcasting) or "proprio" mode: use the plugin's own encoder pair. */
+		/* Main output off (manual start), multitrack main (e.g. Twitch Enhanced Broadcasting) or "proprio" mode:
+		 * use the plugin's own encoder pair. */
 		if (!obter_proprios(s, &venc, &aenc)) {
 			mudar_estado(s, NULL, E_ERRO, ERR_SEM_ENCODER, false);
-			return;
+			return "sem_encoder";
 		}
-		obs_log(LOG_INFO, "saida '%s': using own encoders (%s)", id, modo_proprio ? "proprio mode" : "main output is multitrack");
+		obs_log(LOG_INFO, "saida '%s': using own encoders (%s)", id,
+			!principal_on  ? "main output is off"
+			: modo_proprio ? "proprio mode"
+				       : "main output is multitrack");
 	} else if (!aenc) {
 		obs_log(LOG_WARNING, "saida '%s': main output has no audio encoder", id);
 		mudar_estado(s, NULL, E_ERRO, ERR_SEM_ENCODER, false);
-		return;
+		return "sem_encoder";
 	}
 
 	char nome[MAX_ID + 16];
@@ -609,7 +654,7 @@ static void iniciar_slot(int i)
 			obs_service_release(svc);
 		soltar_proprios(s);
 		mudar_estado(s, NULL, E_ERRO, ERR_OUTRO, false);
-		return;
+		return "outro";
 	}
 
 	obs_output_set_video_encoder(out, venc);
@@ -629,7 +674,9 @@ static void iniciar_slot(int i)
 	if (!obs_output_start(out)) {
 		obs_log(LOG_WARNING, "saida '%s': failed to start (%s)", id, host);
 		derrubar(i, E_ERRO, ERR_FALHA_CONEXAO);
+		return "falha_conexao";
 	}
+	return NULL;
 }
 
 static void parar_slot(int i)
@@ -645,7 +692,7 @@ void saidas_principal_iniciou(void)
 	s_multitrack = false;
 	pthread_mutex_unlock(&s_lock);
 	for (int i = 0; i < MAX_SAIDAS; i++)
-		iniciar_slot(i);
+		(void)iniciar_slot(i, false);
 	pthread_mutex_unlock(&s_op_lock);
 }
 
@@ -816,7 +863,7 @@ void saidas_req_definir(obs_data_t *request_data, obs_data_t *response_data)
 	if (ligado)
 		for (int i = 0; i < MAX_SAIDAS; i++)
 			if (iniciar[i])
-				iniciar_slot(i);
+				(void)iniciar_slot(i, false);
 
 	salvar_config();
 	pthread_mutex_unlock(&s_op_lock);
@@ -847,7 +894,7 @@ void saidas_req_ligar(obs_data_t *request_data, obs_data_t *response_data)
 		if (!ativo)
 			parar_slot(i);
 		else if (ligado)
-			iniciar_slot(i);
+			(void)iniciar_slot(i, false);
 	}
 	salvar_config();
 	pthread_mutex_unlock(&s_op_lock);
@@ -873,6 +920,7 @@ void saidas_req_status(obs_data_t *response_data)
 		obs_data_set_int(it, "bytes", s->out ? (long long)obs_output_get_total_bytes(s->out) : 0);
 		obs_data_set_int(it, "quadros_perdidos", s->out ? obs_output_get_frames_dropped(s->out) : 0);
 		obs_data_set_int(it, "desde", s->desde);
+		obs_data_set_int(it, "kbps", s->kbps);
 		obs_data_array_push_back(arr, it);
 		obs_data_release(it);
 	}
@@ -884,10 +932,230 @@ void saidas_req_status(obs_data_t *response_data)
 	obs_data_set_string(response_data, "encoder_proprio", enc_uso);
 	obs_data_set_string(response_data, "modo_encoder", modo_proprio ? "proprio" : "auto");
 
-	obs_data_set_bool(response_data, "ao_vivo", obs_frontend_streaming_active());
+	struct principal_info pi;
+	saidas_principal_info(&pi);
+	obs_data_t *principal = obs_data_create();
+	obs_data_set_string(principal, "plataforma", pi.plataforma);
+	obs_data_set_bool(principal, "ao_vivo", pi.ao_vivo);
+	obs_data_set_int(principal, "kbps", pi.kbps);
+	obs_data_set_int(principal, "quadros_perdidos", pi.quadros_perdidos);
+	obs_data_set_obj(response_data, "principal", principal);
+	obs_data_release(principal);
+
+	obs_data_set_bool(response_data, "ao_vivo", pi.ao_vivo);
 	obs_data_set_bool(response_data, "multitrack", multitrack);
 	obs_data_set_array(response_data, "saidas", arr);
 	obs_data_array_release(arr);
+}
+
+/* ---------- manual start/stop, snapshots (used by the dock) ---------- */
+
+bool saidas_iniciar_manual(const char *id, const char **erro)
+{
+	const char *e = NULL;
+	if (!s_mutex_ok || !id) {
+		if (erro)
+			*erro = "id_desconhecido";
+		return false;
+	}
+	pthread_mutex_lock(&s_op_lock);
+	int i = achar_slot(id);
+	e = i < 0 ? "id_desconhecido" : iniciar_slot(i, true);
+	pthread_mutex_unlock(&s_op_lock);
+	if (erro)
+		*erro = e ? e : "";
+	return e == NULL;
+}
+
+bool saidas_parar_manual(const char *id, const char **erro)
+{
+	if (!s_mutex_ok || !id) {
+		if (erro)
+			*erro = "id_desconhecido";
+		return false;
+	}
+	pthread_mutex_lock(&s_op_lock);
+	int i = achar_slot(id);
+	if (i >= 0)
+		parar_slot(i);
+	pthread_mutex_unlock(&s_op_lock);
+	if (erro)
+		*erro = i < 0 ? "id_desconhecido" : "";
+	return i >= 0;
+}
+
+size_t saidas_snapshot(struct saida_info *out, size_t max)
+{
+	size_t n = 0;
+	if (!s_mutex_ok || !out)
+		return 0;
+	pthread_mutex_lock(&s_lock);
+	for (int i = 0; i < MAX_SAIDAS && n < max; i++) {
+		const struct saida *s = &s_saidas[i];
+		if (!s->usada)
+			continue;
+		struct saida_info *o = &out[n++];
+		snprintf(o->id, sizeof(o->id), "%s", s->id);
+		snprintf(o->nome, sizeof(o->nome), "%s", s->nome);
+		o->ativo = s->ativo;
+		o->estado = estado_str[s->estado];
+		o->erro = erro_str[s->erro];
+		o->kbps = s->kbps;
+		o->quadros_perdidos = s->out ? obs_output_get_frames_dropped(s->out) : 0;
+		o->usa_proprio = s->usa_proprio;
+	}
+	pthread_mutex_unlock(&s_lock);
+	return n;
+}
+
+static bool contem_ci(const char *texto, const char *procurado)
+{
+	size_t n = strlen(procurado);
+	for (; *texto; texto++) {
+		size_t k = 0;
+		while (k < n && texto[k] && tolower((unsigned char)texto[k]) == procurado[k])
+			k++;
+		if (k == n)
+			return true;
+	}
+	return false;
+}
+
+/* Detects the platform of the main output's streaming service. Returns a static string. */
+static const char *detectar_plataforma(void)
+{
+	const char *res = "";
+	obs_service_t *svc = obs_frontend_get_streaming_service();
+	if (!svc)
+		return res;
+	const char *tipo = obs_service_get_type(svc);
+	obs_data_t *st = obs_service_get_settings(svc);
+	if (tipo && st) {
+		if (strcmp(tipo, "rtmp_common") == 0) {
+			const char *nome = obs_data_get_string(st, "service");
+			if (contem_ci(nome, "twitch"))
+				res = "twitch";
+			else if (contem_ci(nome, "youtube"))
+				res = "youtube";
+			else if (contem_ci(nome, "kick"))
+				res = "kick";
+		} else if (strcmp(tipo, "rtmp_custom") == 0) {
+			const char *srv = obs_data_get_string(st, "server");
+			if (contem_ci(srv, "twitch"))
+				res = "twitch";
+			else if (contem_ci(srv, "youtube"))
+				res = "youtube";
+			else if (contem_ci(srv, "kick") || contem_ci(srv, "global-contribute.live-video.net"))
+				res = "kick";
+		}
+	}
+	if (st)
+		obs_data_release(st);
+	obs_service_release(svc);
+	return res;
+}
+
+void saidas_principal_info(struct principal_info *out)
+{
+	memset(out, 0, sizeof(*out));
+	if (!s_mutex_ok)
+		return;
+	snprintf(out->plataforma, sizeof(out->plataforma), "%s", detectar_plataforma());
+	out->ao_vivo = obs_frontend_streaming_active();
+	pthread_mutex_lock(&s_lock);
+	out->kbps = out->ao_vivo ? s_principal_kbps : 0;
+	out->quadros_perdidos = out->ao_vivo ? s_principal_perdidos : 0;
+	out->multitrack = s_multitrack;
+	out->bitrate_proprio = s_bitrate_proprio;
+	snprintf(out->encoder_proprio, sizeof(out->encoder_proprio), "%s", s_enc_em_uso);
+	pthread_mutex_unlock(&s_lock);
+}
+
+/* ---------- bitrate sampler (background thread) ---------- */
+
+/* Adds a sample and returns the kbps over the kept window (0 until there are two samples). Caller holds lock. */
+static int amostrar(struct amostrador *a, uint64_t t, uint64_t bytes)
+{
+	if (a->n > 0 && bytes < a->b[a->n - 1])
+		a->n = 0; /* counter restarted */
+	if (a->n == N_AMOSTRAS) {
+		for (int k = 1; k < N_AMOSTRAS; k++) {
+			a->t[k - 1] = a->t[k];
+			a->b[k - 1] = a->b[k];
+		}
+		a->n--;
+	}
+	a->t[a->n] = t;
+	a->b[a->n] = bytes;
+	a->n++;
+	if (a->n < 2)
+		return 0;
+	uint64_t dt = a->t[a->n - 1] - a->t[0];
+	if (dt == 0)
+		return 0;
+	double kbps = (double)(a->b[a->n - 1] - a->b[0]) * 8.0 * 1e9 / (double)dt / 1000.0;
+	return kbps < 0 ? 0 : (int)(kbps + 0.5);
+}
+
+static void amostrar_tudo(void)
+{
+	uint64_t agora = os_gettime_ns();
+	bool vivo = obs_frontend_streaming_active();
+	uint64_t pbytes = 0;
+	int pperdidos = 0;
+
+	if (vivo) {
+		obs_output_t *p = obs_frontend_get_streaming_output();
+		if (p) {
+			pbytes = obs_output_get_total_bytes(p);
+			pperdidos = obs_output_get_frames_dropped(p);
+			obs_output_release(p);
+		}
+	}
+
+	pthread_mutex_lock(&s_lock);
+	if (vivo) {
+		s_principal_kbps = amostrar(&s_am_principal, agora, pbytes);
+		s_principal_perdidos = pperdidos;
+	} else {
+		s_am_principal.n = 0;
+		s_principal_kbps = 0;
+		s_principal_perdidos = 0;
+	}
+	for (int i = 0; i < MAX_SAIDAS; i++) {
+		struct saida *s = &s_saidas[i];
+		if (!s->usada || !s->out) {
+			s->am.n = 0;
+			s->am_out = NULL;
+			s->kbps = 0;
+			continue;
+		}
+		if (s->am_out != s->out) {
+			s->am.n = 0;
+			s->am_out = s->out;
+		}
+		s->kbps = amostrar(&s->am, agora, obs_output_get_total_bytes(s->out));
+	}
+	pthread_mutex_unlock(&s_lock);
+}
+
+static void *amostrador_thread(void *arg)
+{
+	UNUSED_PARAMETER(arg);
+	while (os_event_timedwait(s_stop_ev, 1000) == ETIMEDOUT)
+		amostrar_tudo();
+	return NULL;
+}
+
+void saidas_amostrador_parar(void)
+{
+	if (!s_thr_ok)
+		return;
+	os_event_signal(s_stop_ev);
+	pthread_join(s_thr, NULL);
+	s_thr_ok = false;
+	os_event_destroy(s_stop_ev);
+	s_stop_ev = NULL;
 }
 
 /* ---------- lifecycle ---------- */
@@ -900,12 +1168,21 @@ void saidas_init(saidas_emit_fn emit)
 		s_mutex_ok = true;
 	}
 	s_emit = emit;
+	if (!s_thr_ok && os_event_init(&s_stop_ev, OS_EVENT_TYPE_MANUAL) == 0) {
+		if (pthread_create(&s_thr, NULL, amostrador_thread, NULL) == 0) {
+			s_thr_ok = true;
+		} else {
+			os_event_destroy(s_stop_ev);
+			s_stop_ev = NULL;
+		}
+	}
 }
 
 void saidas_liberar(void)
 {
 	if (!s_mutex_ok)
 		return;
+	saidas_amostrador_parar();
 	saidas_parar_tudo();
 	s_emit = NULL;
 	memset(s_saidas, 0, sizeof(s_saidas));
