@@ -11,7 +11,16 @@ A resposta chega em `responseData.responseData`. Para receber os eventos do vend
 
 **Versão da API: 3** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio`, `modo_encoder` e `encoder_proprio`/`modo_encoder` no `saidas.status`).
 
+**API 4** (painel do OBS): adiciona `saida.iniciar`/`saida.parar`, o campo `kbps` em cada saída do `saidas.status` e o bloco `principal`.
+
 ## Requests
+
+### `saida.iniciar` / `saida.parar` (API 4)
+Request: `{"id": "youtube"}`. Liga ou para **agora** só essa saída. Não muda o `ativo` gravado: `ativo` continua significando "liga sozinha quando a principal entrar no ar".
+- Pode ser chamado com a principal fora do ar. Nesse caso a saída usa o **codificador próprio**, porque o encoder da principal não está rodando.
+- Com a principal no ar, a saída segue o `modo_encoder`: `auto` usa o encoder da principal (ou o próprio, se a principal for multitrack); `proprio` usa sempre o próprio.
+- Quando a principal para, **todas** as extras param, inclusive as ligadas pelo botão.
+- Respostas: `{"ok": true}`, `{"ok": false, "erro": "id_desconhecido"}` ou `{"ok": false, "erro": "sem_encoder"}`.
 
 ### `status`
 Resposta: `{"plugin_versao": "0.3.0", "obs_versao": "33.0.1", "api": 3}`
@@ -48,6 +57,8 @@ Resposta (**nunca inclui a key**):
 - `estado`: `parado` | `conectando` | `ao_vivo` | `reconectando` | `erro`.
 - `erro`: `""` | `key_invalida` | `falha_conexao` | `desconectado` | `sem_encoder` | `multitrack` | `outro`.
 - `desde`: momento (unix, em segundos) em que a saída entrou `ao_vivo`. Fica `0` fora do ar.
+- `kbps` (API 4): bitrate de saída atual, calculado pelo plugin com média dos últimos ~3 s. Fica `0` fora do ar.
+- `principal` (API 4): `{"plataforma": "twitch"|"youtube"|"kick"|"", "ao_vivo": bool, "kbps": int, "quadros_perdidos": int}`. A plataforma é detectada pelo serviço de transmissão do OBS: `rtmp_common` pelo nome do serviço, ou `rtmp_custom` pelo host do servidor; vazio se não reconhecer.
 
 ### `saida.ligar`
 Request: `{"id": "kick", "ativo": false}`. Liga ou desliga uma saída e grava a mudança. Com a principal no ar, inicia ou para só essa saída.
