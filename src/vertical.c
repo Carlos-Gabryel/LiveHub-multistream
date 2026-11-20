@@ -61,8 +61,8 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "saidas.h"
 
 #define NOME_CANVAS "LiveHub Vertical"
-#define V_LARGURA 1080
-#define V_ALTURA 1920
+#define V_LARGURA VERTICAL_LARGURA
+#define V_ALTURA VERTICAL_ALTURA
 #define MAX_NOME 64
 #define MAX_CENAS 32
 #define MAX_ITENS 128
@@ -77,6 +77,14 @@ static obs_data_t *s_dados = NULL; /* data stashed by the load callback, waiting
 static obs_data_t *s_snap = NULL;  /* snapshot taken when the canvas was torn down, for the pending save */
 static bool s_pronto = false;      /* FINISHED_LOADING seen, canvas may be created */
 static volatile bool s_disp = false;
+static volatile long s_versao = 1;
+static void (*s_ui_cb)(void *) = NULL; /* UI hook, set/called on the UI thread only */
+static void *s_ui_dados = NULL;
+
+static void bump(void)
+{
+	os_atomic_inc_long(&s_versao);
+}
 
 const char *const VERTICAL_REQUESTS[] = {
 	"vertical.status",           "vertical.cenas.listar",   "vertical.cenas.criar",    "vertical.cenas.remover",
@@ -270,8 +278,10 @@ static void aplicar_ligacao(void)
 			if (sc) {
 				obs_source_t *src = obs_scene_get_source(sc);
 				obs_source_t *atual = obs_canvas_get_channel(s_canvas, 0);
-				if (atual != src) /* hard cut */
+				if (atual != src) { /* hard cut */
 					obs_canvas_set_channel(s_canvas, 0, src);
+					bump();
+				}
 				obs_source_release(atual);
 				liberar_cena(sc);
 			}
@@ -348,6 +358,7 @@ static void montar(void)
 	obs_data_release(s_snap);
 	s_snap = NULL;
 	os_atomic_set_bool(&s_disp, true);
+	bump();
 	pthread_mutex_unlock(&s_vlock);
 
 	obs_log(LOG_INFO, "vertical canvas created (%dx%d), %d scene(s) loaded", V_LARGURA, V_ALTURA, carregadas);
@@ -395,8 +406,12 @@ static void desmontar(bool guardar)
 	}
 	obs_data_t *lig = s_lig;
 	s_lig = NULL;
+	bump();
 	pthread_mutex_unlock(&s_vlock);
 	/* From here no request can reach the canvas (s_canvas is NULL) and `c` is owned by us. */
+
+	if (s_ui_cb) /* the UI drops its canvas references and displays before the teardown */
+		s_ui_cb(s_ui_dados);
 
 	saidas_parar_verticais(); /* the vertical encoders use the canvas video */
 
@@ -1031,9 +1046,316 @@ bool vertical_request(const char *nome, obs_data_t *request_data, obs_data_t *re
 		pthread_mutex_unlock(&s_vlock);
 		if (mudou && REQS[i].fn == h_lig_definir)
 			aplicar_ligacao();
-		if (mudou)
+		if (mudou) {
+			bump();
 			obs_frontend_save(); /* queued by OBS: marks the scene collection dirty, saved on its normal cycle */
+		}
 		return true;
 	}
 	return false;
+}
+
+/* ---------- C API for the docks ---------- */
+
+uint64_t vertical_versao(void)
+{
+	return (uint64_t)os_atomic_load_long(&s_versao);
+}
+
+obs_canvas_t *vertical_canvas_ref(void)
+{
+	if (!s_vok)
+		return NULL;
+	obs_canvas_t *c = NULL;
+	pthread_mutex_lock(&s_vlock);
+	if (s_canvas)
+		c = obs_canvas_get_ref(s_canvas);
+	pthread_mutex_unlock(&s_vlock);
+	return c;
+}
+
+obs_source_t *vertical_cena_ativa_ref(void)
+{
+	if (!s_vok)
+		return NULL;
+	obs_source_t *s = NULL;
+	pthread_mutex_lock(&s_vlock);
+	if (s_canvas)
+		s = obs_canvas_get_channel(s_canvas, 0);
+	pthread_mutex_unlock(&s_vlock);
+	return s;
+}
+
+void vertical_ui_ao_desmontar(void (*cb)(void *), void *dados)
+{
+	s_ui_dados = dados;
+	s_ui_cb = cb;
+}
+
+struct ctx_cenas {
+	struct vertical_cena *out;
+	size_t n, max;
+	obs_source_t *ativa;
+};
+
+static bool cb_cenas_ui(void *p, obs_source_t *src)
+{
+	struct ctx_cenas *c = p;
+	if (c->n >= c->max)
+		return false;
+	struct vertical_cena *o = &c->out[c->n++];
+	snprintf(o->nome, sizeof(o->nome), "%s", obs_source_get_name(src));
+	o->ativa = src == c->ativa;
+	o->itens = contar_itens(obs_scene_from_source(src));
+	return true;
+}
+
+size_t vertical_cenas_listar(struct vertical_cena *out, size_t max)
+{
+	if (!s_vok || !out)
+		return 0;
+	struct ctx_cenas c = {out, 0, max, NULL};
+	pthread_mutex_lock(&s_vlock);
+	if (s_canvas) {
+		c.ativa = obs_canvas_get_channel(s_canvas, 0);
+		obs_canvas_enum_scenes(s_canvas, cb_cenas_ui, &c);
+		obs_source_release(c.ativa);
+	}
+	pthread_mutex_unlock(&s_vlock);
+	return c.n;
+}
+
+/* Runs a vendor-request handler for the UI: returns NULL on success, else the protocol error (valid until the
+ * next call, UI thread only). */
+static const char *req_ui(const char *nome, obs_data_t *rq, obs_data_t **rs_out)
+{
+	static char ebuf[64];
+	obs_data_t *rs = obs_data_create();
+	vertical_request(nome, rq, rs);
+	bool ok = obs_data_get_bool(rs, "ok");
+	snprintf(ebuf, sizeof(ebuf), "%s", obs_data_get_string(rs, "erro"));
+	if (rs_out)
+		*rs_out = rs;
+	else
+		obs_data_release(rs);
+	obs_data_release(rq);
+	if (ok)
+		return NULL;
+	return *ebuf ? ebuf : "outro";
+}
+
+const char *vertical_cena_criar(const char *nome)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "nome", nome ? nome : "");
+	return req_ui("vertical.cenas.criar", rq, NULL);
+}
+
+const char *vertical_cena_renomear(const char *nome, const char *novo)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "nome", nome ? nome : "");
+	obs_data_set_string(rq, "novo", novo ? novo : "");
+	return req_ui("vertical.cenas.renomear", rq, NULL);
+}
+
+const char *vertical_cena_remover(const char *nome)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "nome", nome ? nome : "");
+	return req_ui("vertical.cenas.remover", rq, NULL);
+}
+
+const char *vertical_cena_ativar(const char *nome)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "nome", nome ? nome : "");
+	return req_ui("vertical.cena.ativar", rq, NULL);
+}
+
+void vertical_ligacao_obter(const char *vnome, char *dst, size_t n)
+{
+	if (!n)
+		return;
+	dst[0] = 0;
+	if (!s_vok || !vnome)
+		return;
+	pthread_mutex_lock(&s_vlock);
+	if (s_canvas && s_lig) {
+		for (obs_data_item_t *it = obs_data_first(s_lig); it; obs_data_item_next(&it)) {
+			if (obs_data_item_gettype(it) == OBS_DATA_STRING &&
+			    strcmp(obs_data_item_get_string(it), vnome) == 0) {
+				snprintf(dst, n, "%s", obs_data_item_get_name(it));
+				obs_data_item_release(&it);
+				break;
+			}
+		}
+	}
+	pthread_mutex_unlock(&s_vlock);
+}
+
+const char *vertical_ligacao_definir(const char *vnome, const char *principal)
+{
+	if (!s_vok || !vnome)
+		return "canvas_indisponivel";
+	if (principal && strlen(principal) > 256)
+		return "parametro_invalido";
+	const char *e = NULL;
+	pthread_mutex_lock(&s_vlock);
+	if (!s_canvas || !s_lig) {
+		e = "canvas_indisponivel";
+	} else {
+		obs_scene_t *sc = achar_cena(vnome);
+		if (!sc) {
+			e = "cena_inexistente";
+		} else {
+			liberar_cena(sc);
+			struct lista_chaves chaves;
+			da_init(chaves.a);
+			chaves_para(vnome, &chaves);
+			for (size_t i = 0; i < chaves.a.num; i++)
+				obs_data_unset_user_value(s_lig, chaves.a.array[i]);
+			free_chaves(&chaves);
+			if (principal && *principal)
+				obs_data_set_string(s_lig, principal, vnome);
+		}
+	}
+	pthread_mutex_unlock(&s_vlock);
+	if (!e) {
+		bump();
+		obs_frontend_save();
+		aplicar_ligacao();
+	}
+	return e;
+}
+
+struct ctx_itens {
+	struct vertical_item *out;
+	size_t n, max;
+};
+
+static bool cb_itens_ui(obs_scene_t *sc, obs_sceneitem_t *item, void *p)
+{
+	UNUSED_PARAMETER(sc);
+	struct ctx_itens *c = p;
+	if (c->n >= c->max)
+		return false;
+	struct vertical_item *o = &c->out[c->n++];
+	obs_source_t *src = obs_sceneitem_get_source(item);
+	memset(o, 0, sizeof(*o));
+	o->id = obs_sceneitem_get_id(item);
+	snprintf(o->nome, sizeof(o->nome), "%s", obs_source_get_name(src));
+	o->visivel = obs_sceneitem_visible(item);
+	o->bloqueado = obs_sceneitem_locked(item);
+	o->video = (obs_source_get_output_flags(src) & OBS_SOURCE_VIDEO) != 0;
+	o->largura = obs_source_get_width(src);
+	o->altura = obs_source_get_height(src);
+	o->ordem = obs_sceneitem_get_order_position(item);
+	obs_sceneitem_get_info2(item, &o->ti);
+	obs_sceneitem_get_crop(item, &o->crop);
+	obs_sceneitem_get_box_transform(item, &o->caixa);
+	return true;
+}
+
+/* Caller holds s_vlock with a canvas. `cena` "" = the active scene. Returns a referenced scene or NULL. */
+static obs_scene_t *cena_ou_ativa(const char *cena)
+{
+	if (cena && *cena)
+		return achar_cena(cena);
+	obs_source_t *a = obs_canvas_get_channel(s_canvas, 0);
+	if (!a)
+		return NULL;
+	obs_scene_t *sc = obs_scene_from_source(a); /* the channel reference becomes the caller's */
+	return sc;
+}
+
+size_t vertical_itens(const char *cena, struct vertical_item *out, size_t max)
+{
+	if (!s_vok || !out)
+		return 0;
+	struct ctx_itens c = {out, 0, max};
+	pthread_mutex_lock(&s_vlock);
+	if (s_canvas) {
+		obs_scene_t *sc = cena_ou_ativa(cena);
+		if (sc) {
+			obs_scene_enum_items(sc, cb_itens_ui, &c);
+			liberar_cena(sc);
+		}
+	}
+	pthread_mutex_unlock(&s_vlock);
+	return c.n;
+}
+
+const char *vertical_item_adicionar(const char *cena, const char *fonte, int64_t *id)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "cena", cena ? cena : "");
+	obs_data_set_string(rq, "fonte", fonte ? fonte : "");
+	obs_data_t *rs = NULL;
+	const char *e = req_ui("vertical.item.adicionar", rq, &rs);
+	if (!e && id)
+		*id = obs_data_get_int(rs, "id");
+	obs_data_release(rs);
+	return e;
+}
+
+static obs_data_t *rq_item(const char *cena, int64_t id)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "cena", cena ? cena : "");
+	obs_data_set_int(rq, "id", id);
+	return rq;
+}
+
+const char *vertical_item_visivel(const char *cena, int64_t id, bool visivel)
+{
+	obs_data_t *rq = rq_item(cena, id);
+	obs_data_set_bool(rq, "visivel", visivel);
+	return req_ui("vertical.item.visivel", rq, NULL);
+}
+
+const char *vertical_item_ordem(const char *cena, int64_t id, int posicao)
+{
+	obs_data_t *rq = rq_item(cena, id);
+	obs_data_set_int(rq, "posicao", posicao);
+	return req_ui("vertical.item.ordem", rq, NULL);
+}
+
+const char *vertical_item_remover(const char *cena, int64_t id)
+{
+	return req_ui("vertical.item.remover", rq_item(cena, id), NULL);
+}
+
+bool vertical_item_transformar(const char *cena, int64_t id, const struct obs_transform_info *ti,
+			       const struct obs_sceneitem_crop *crop)
+{
+	if (!s_vok || !ti)
+		return false;
+	bool ok = false;
+	pthread_mutex_lock(&s_vlock);
+	if (s_canvas) {
+		obs_scene_t *sc = cena_ou_ativa(cena);
+		if (sc) {
+			obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(sc, id);
+			if (item) {
+				obs_sceneitem_defer_update_begin(item);
+				obs_sceneitem_set_info2(item, ti);
+				if (crop)
+					obs_sceneitem_set_crop(item, crop);
+				obs_sceneitem_defer_update_end(item);
+				ok = true;
+			}
+			liberar_cena(sc);
+		}
+	}
+	pthread_mutex_unlock(&s_vlock);
+	return ok;
+}
+
+void vertical_alteracao_concluida(void)
+{
+	if (!s_vok)
+		return;
+	bump();
+	obs_frontend_save();
 }

@@ -27,7 +27,7 @@ Request: `{"id": "youtube"}`. Liga ou para **agora** só essa saída. Não muda 
 - Respostas: `{"ok": true}`, `{"ok": false, "erro": "id_desconhecido"}` ou `{"ok": false, "erro": "sem_encoder"}`.
 
 ### `status`
-Resposta: `{"plugin_versao": "0.6.0", "obs_versao": "33.0.1", "api": 6}`
+Resposta: `{"plugin_versao": "0.7.0", "obs_versao": "33.0.1", "api": 6}`
 
 ### `saidas.definir`
 Substitui a lista inteira de saídas extras e grava em `obs_module_config_path("saidas.json")`. O plugin continua funcionando sem o LiveHub aberto.

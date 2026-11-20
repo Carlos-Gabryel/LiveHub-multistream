@@ -29,6 +29,11 @@ void lhms_dock_desligando(void);
 /* Removes the dock and waits for in-flight manual start/stop requests. Call on the UI thread. */
 void lhms_dock_remover(void);
 
+/* Vertical canvas docks (preview, scenes, sources); same contract as the Multistream dock functions. */
+void lhms_vdocks_registrar(void);
+void lhms_vdocks_desligando(void);
+void lhms_vdocks_remover(void);
+
 #ifdef __cplusplus
 }
 #endif

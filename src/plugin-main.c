@@ -62,6 +62,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		saidas_frontend_pronto(true);
 		lhms_dock_registrar(); /* frontend events run on the Qt UI thread */
+		lhms_vdocks_registrar();
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		saidas_principal_iniciou();
@@ -71,6 +72,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		break;
 	case OBS_FRONTEND_EVENT_EXIT: {
 		lhms_dock_desligando();
+		lhms_vdocks_desligando();
 		saidas_frontend_pronto(false);
 		/* Stop every extra output before unregistering. */
 		saidas_parar_tudo();
@@ -251,6 +253,7 @@ void obs_module_unload(void)
 {
 	/* Do not touch obs-websocket here: it may already be unloaded. */
 	lhms_dock_remover();
+	lhms_vdocks_remover();
 	obs_frontend_remove_event_callback(on_frontend_event, NULL);
 	lhms_ativo = false;
 	vertical_liberar();
