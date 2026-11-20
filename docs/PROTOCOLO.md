@@ -9,12 +9,12 @@ O plugin registra no obs-websocket (v5) o vendor **`livehub-multistream`**. Os c
 
 A resposta chega em `responseData.responseData`. Para receber os eventos do vendor, o cliente precisa assinar `EventSubscription::Vendors` (`1 << 9` = 512).
 
-**Versão da API: 2** (a fase 1 adiciona as saídas extras).
+**Versão da API: 3** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio` e `encoder_proprio` no `saidas.status`).
 
 ## Requests
 
 ### `status`
-Resposta: `{"plugin_versao": "0.2.0", "obs_versao": "33.0.1", "api": 2}`
+Resposta: `{"plugin_versao": "0.3.0", "obs_versao": "33.0.1", "api": 3}`
 
 ### `saidas.definir`
 Substitui a lista inteira de saídas extras e grava em `obs_module_config_path("saidas.json")`. O plugin continua funcionando sem o LiveHub aberto.
@@ -61,6 +61,7 @@ Quando a saída principal é multitrack (Enhanced Broadcasting da Twitch), não 
 - O request `saidas.definir` aceita os campos opcionais `"bitrate_proprio"` (kbps, inteiro de 1000 a 20000, padrão 6000) e `"encoder_proprio"` (`""` = automático, ou o id de um encoder de vídeo do OBS).
 - No modo automático, a escolha do encoder segue esta ordem, usando o primeiro que existir: `obs_nvenc_h264_tex`, `jim_nvenc`, `h264_texture_amf`, `obs_qsv11_v2`, `obs_qsv11`, `obs_x264`.
 - Configuração do encoder de vídeo: `rate_control` CBR, `bitrate` = bitrate_proprio, `keyint_sec` 2. Áudio: AAC (`ffmpeg_aac`, ou `CoreAudio_AAC` se existir) a 160 kbps, na trilha/mixer 0.
+- Valores inválidos respondem `{"ok": false, "erro": "bitrate_invalido"}` ou `"encoder_invalido"`; ambos ficam salvos em `saidas.json`. Se uma extra já está no ar com encoders próprios, mudanças de bitrate/encoder só valem no próximo início.
 - Os encoders próprios são criados quando a primeira saída extra inicia no modo multitrack e liberados quando a última para.
 - O `saidas.status` ganha `"encoder_proprio": "<id em uso ou \"\">"`. Com codificador próprio, as extras **não ficam em erro**: `multitrack: true` passa a ser só informativo. O erro `multitrack` só acontece se nenhum encoder puder ser criado (aí o erro é `sem_encoder`).
 

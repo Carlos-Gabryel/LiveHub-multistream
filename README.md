@@ -6,6 +6,8 @@ Fase 0: o plugin apenas registra o vendor `livehub-multistream` no obs-websocket
 
 Fase 1: saidas extras (por exemplo YouTube e Kick) que reaproveitam o encoder da transmissao principal, sem segunda codificacao. Sao controladas pelo LiveHub via obs-websocket (`saidas.definir`, `saidas.status`, `saida.ligar` e o evento `saida_estado`), iniciam e param junto com a transmissao principal e ficam salvas em `saidas.json`. Veja o protocolo em [docs/PROTOCOLO.md](docs/PROTOCOLO.md).
 
+Fase 1.1 (API 3): com Enhanced Broadcasting (multitrack) nao ha encoder simples para compartilhar, entao as extras usam um codificador proprio do plugin (encoder e bitrate configuraveis via `bitrate_proprio` e `encoder_proprio`).
+
 ## Licenca
 
 GPLv2 ou posterior.

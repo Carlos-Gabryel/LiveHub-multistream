@@ -58,10 +58,27 @@ struct saida {
 
 	obs_output_t *out;
 	obs_service_t *svc;
+	bool usa_proprio; /* holds a reference on the plugin's own encoder pair */
 	enum estado estado;
 	enum erro erro;
 	long long desde;
 };
+
+#define MAX_ENC_ID 64
+#define BITRATE_MIN 1000
+#define BITRATE_MAX 20000
+#define BITRATE_PADRAO 6000
+
+/* Own encoder pair (multitrack main output). Protected by lock; refs counts the slots using it. */
+static int s_bitrate_proprio = BITRATE_PADRAO;
+static char s_encoder_proprio[MAX_ENC_ID] = ""; /* "" = auto */
+static obs_encoder_t *s_venc = NULL;
+static obs_encoder_t *s_aenc = NULL;
+static int s_enc_refs = 0;
+static char s_enc_em_uso[MAX_ENC_ID] = "";
+
+static const char *const s_auto_encoders[] = {"obs_nvenc_h264_tex", "jim_nvenc", "h264_texture_amf",
+					      "obs_qsv11_v2",       "obs_qsv11",  "obs_x264"};
 
 static struct saida s_saidas[MAX_SAIDAS];
 static pthread_mutex_t s_lock;
@@ -158,6 +175,20 @@ static void copiar_cfg(struct saida *dst, const struct saida *src)
 	dst->ativo = src->ativo;
 }
 
+static bool encoder_existe(const char *id, enum obs_encoder_type tipo)
+{
+	const char *tid;
+	for (size_t i = 0; obs_enum_encoder_types(i, &tid); i++)
+		if (strcmp(tid, id) == 0)
+			return obs_get_encoder_type(tid) == tipo;
+	return false;
+}
+
+static bool bitrate_valido(long long v)
+{
+	return v >= BITRATE_MIN && v <= BITRATE_MAX;
+}
+
 static int achar_slot(const char *id) /* caller: op_lock or lock */
 {
 	for (int i = 0; i < MAX_SAIDAS; i++)
@@ -224,6 +255,10 @@ static void salvar_config(void) /* caller holds op_lock */
 
 	obs_data_set_array(raiz, "saidas", arr);
 	obs_data_array_release(arr);
+	pthread_mutex_lock(&s_lock);
+	obs_data_set_int(raiz, "bitrate_proprio", s_bitrate_proprio);
+	obs_data_set_string(raiz, "encoder_proprio", s_encoder_proprio);
+	pthread_mutex_unlock(&s_lock);
 
 	char *dir = obs_module_config_path("");
 	char *path = obs_module_config_path("saidas.json");
@@ -247,6 +282,17 @@ void saidas_carregar(void)
 	bfree(path);
 	if (!raiz)
 		return;
+
+	{
+		long long br = obs_data_has_user_value(raiz, "bitrate_proprio") ? obs_data_get_int(raiz, "bitrate_proprio")
+										: BITRATE_PADRAO;
+		const char *enc = obs_data_get_string(raiz, "encoder_proprio");
+		pthread_mutex_lock(&s_lock);
+		s_bitrate_proprio = bitrate_valido(br) ? (int)br : BITRATE_PADRAO;
+		if (strlen(enc) < MAX_ENC_ID)
+			snprintf(s_encoder_proprio, sizeof(s_encoder_proprio), "%s", enc);
+		pthread_mutex_unlock(&s_lock);
+	}
 
 	obs_data_array_t *arr = obs_data_get_array(raiz, "saidas");
 	if (arr) {
@@ -347,6 +393,115 @@ static void desconectar_sinais(struct saida *s, obs_output_t *out)
 
 /* ---------- start / stop (caller holds op_lock) ---------- */
 
+static obs_encoder_t *criar_video(const char *id, int bitrate)
+{
+	if (!encoder_existe(id, OBS_ENCODER_VIDEO))
+		return NULL;
+	obs_data_t *st = obs_data_create();
+	obs_data_set_string(st, "rate_control", "CBR");
+	obs_data_set_int(st, "bitrate", bitrate);
+	obs_data_set_int(st, "keyint_sec", 2);
+	obs_encoder_t *e = obs_video_encoder_create(id, "livehub-ms-venc", st, NULL);
+	obs_data_release(st);
+	if (e)
+		obs_encoder_set_video(e, obs_get_video());
+	return e;
+}
+
+static obs_encoder_t *criar_audio(void)
+{
+	const char *id = encoder_existe("CoreAudio_AAC", OBS_ENCODER_AUDIO) ? "CoreAudio_AAC" : "ffmpeg_aac";
+	obs_data_t *st = obs_data_create();
+	obs_data_set_int(st, "bitrate", 160);
+	obs_encoder_t *e = obs_audio_encoder_create(id, "livehub-ms-aenc", st, 0, NULL);
+	obs_data_release(st);
+	if (e)
+		obs_encoder_set_audio(e, obs_get_audio());
+	return e;
+}
+
+/* Takes a reference on the own encoder pair for slot s, creating it if needed. Caller holds op_lock and not lock.
+ * Returns false when no encoder pair could be created. */
+static bool obter_proprios(struct saida *s, obs_encoder_t **venc, obs_encoder_t **aenc)
+{
+	char pedido[MAX_ENC_ID];
+	int bitrate;
+
+	pthread_mutex_lock(&s_lock);
+	if (s_venc) {
+		if (!s->usa_proprio) {
+			s->usa_proprio = true;
+			s_enc_refs++;
+		}
+		*venc = s_venc;
+		*aenc = s_aenc;
+		pthread_mutex_unlock(&s_lock);
+		return true;
+	}
+	snprintf(pedido, sizeof(pedido), "%s", s_encoder_proprio);
+	bitrate = s_bitrate_proprio;
+	pthread_mutex_unlock(&s_lock);
+
+	const char *usado = NULL;
+	obs_encoder_t *v = NULL;
+	if (*pedido) {
+		v = criar_video(pedido, bitrate);
+		usado = pedido;
+	} else {
+		for (size_t i = 0; !v && i < sizeof(s_auto_encoders) / sizeof(s_auto_encoders[0]); i++) {
+			v = criar_video(s_auto_encoders[i], bitrate);
+			usado = s_auto_encoders[i];
+		}
+	}
+	obs_encoder_t *a = v ? criar_audio() : NULL;
+	if (!v || !a) {
+		if (v)
+			obs_encoder_release(v);
+		if (a)
+			obs_encoder_release(a);
+		obs_log(LOG_WARNING, "own encoders: could not create encoder pair (video=%s)", *pedido ? pedido : "auto");
+		return false;
+	}
+
+	pthread_mutex_lock(&s_lock);
+	s_venc = v;
+	s_aenc = a;
+	snprintf(s_enc_em_uso, sizeof(s_enc_em_uso), "%s", usado);
+	s->usa_proprio = true;
+	s_enc_refs++;
+	pthread_mutex_unlock(&s_lock);
+	obs_log(LOG_INFO, "own encoders created: video=%s bitrate=%d kbps, audio 160 kbps", usado, bitrate);
+	*venc = v;
+	*aenc = a;
+	return true;
+}
+
+/* Drops the slot's reference on the own encoders; the last one releases them. Caller holds op_lock, not lock. */
+static void soltar_proprios(struct saida *s)
+{
+	obs_encoder_t *v = NULL, *a = NULL;
+
+	pthread_mutex_lock(&s_lock);
+	if (s->usa_proprio) {
+		s->usa_proprio = false;
+		if (--s_enc_refs <= 0) {
+			s_enc_refs = 0;
+			v = s_venc;
+			a = s_aenc;
+			s_venc = s_aenc = NULL;
+			s_enc_em_uso[0] = 0;
+		}
+	}
+	pthread_mutex_unlock(&s_lock);
+
+	if (v)
+		obs_encoder_release(v);
+	if (a)
+		obs_encoder_release(a);
+	if (v)
+		obs_log(LOG_INFO, "own encoders released");
+}
+
 /* Detaches the output from the slot, stops and releases it, then sets the final state. */
 static void derrubar(int i, enum estado estado, enum erro erro)
 {
@@ -373,6 +528,7 @@ static void derrubar(int i, enum estado estado, enum erro erro)
 	}
 	if (svc)
 		obs_service_release(svc);
+	soltar_proprios(s); /* after the output is gone, so the encoders are no longer in use */
 
 	mudar_estado(s, NULL, estado, erro, false);
 }
@@ -413,15 +569,16 @@ static void iniciar_slot(int i)
 		obs_output_release(principal);
 
 	if (!venc) {
-		/* Multitrack main output (e.g. Twitch Enhanced Broadcasting): no simple encoder to share. */
+		/* Multitrack main output (e.g. Twitch Enhanced Broadcasting): use the plugin's own encoder pair. */
 		pthread_mutex_lock(&s_lock);
 		s_multitrack = true;
 		pthread_mutex_unlock(&s_lock);
-		obs_log(LOG_WARNING, "saida '%s': main output is multitrack, not starting", id);
-		mudar_estado(s, NULL, E_ERRO, ERR_MULTITRACK, false);
-		return;
-	}
-	if (!aenc) {
+		if (!obter_proprios(s, &venc, &aenc)) {
+			mudar_estado(s, NULL, E_ERRO, ERR_SEM_ENCODER, false);
+			return;
+		}
+		obs_log(LOG_INFO, "saida '%s': main output is multitrack, using own encoders", id);
+	} else if (!aenc) {
 		obs_log(LOG_WARNING, "saida '%s': main output has no audio encoder", id);
 		mudar_estado(s, NULL, E_ERRO, ERR_SEM_ENCODER, false);
 		return;
@@ -444,6 +601,7 @@ static void iniciar_slot(int i)
 			obs_output_release(out);
 		if (svc)
 			obs_service_release(svc);
+		soltar_proprios(s);
 		mudar_estado(s, NULL, E_ERRO, ERR_OUTRO, false);
 		return;
 	}
@@ -499,6 +657,19 @@ void saidas_parar_tudo(void)
 		if (usada)
 			parar_slot(i);
 	}
+	/* Defensive: nothing should still hold the own encoders at this point. */
+	pthread_mutex_lock(&s_lock);
+	obs_encoder_t *v = s_venc, *a = s_aenc;
+	s_venc = s_aenc = NULL;
+	s_enc_refs = 0;
+	s_enc_em_uso[0] = 0;
+	for (int i = 0; i < MAX_SAIDAS; i++)
+		s_saidas[i].usa_proprio = false;
+	pthread_mutex_unlock(&s_lock);
+	if (v)
+		obs_encoder_release(v);
+	if (a)
+		obs_encoder_release(a);
 	pthread_mutex_unlock(&s_op_lock);
 }
 
@@ -546,7 +717,27 @@ void saidas_req_definir(obs_data_t *request_data, obs_data_t *response_data)
 		return;
 	}
 
+	/* Optional own-encoder fields (absent = keep current). Applied to a running extra only on its next start. */
+	bool tem_br = obs_data_has_user_value(request_data, "bitrate_proprio");
+	bool tem_enc = obs_data_has_user_value(request_data, "encoder_proprio");
+	long long novo_br = tem_br ? obs_data_get_int(request_data, "bitrate_proprio") : 0;
+	const char *novo_enc = tem_enc ? obs_data_get_string(request_data, "encoder_proprio") : "";
+	if (tem_br && !bitrate_valido(novo_br)) {
+		responder_erro(response_data, "bitrate_invalido");
+		return;
+	}
+	if (tem_enc && *novo_enc && (strlen(novo_enc) >= MAX_ENC_ID || !encoder_existe(novo_enc, OBS_ENCODER_VIDEO))) {
+		responder_erro(response_data, "encoder_invalido");
+		return;
+	}
+
 	pthread_mutex_lock(&s_op_lock);
+	pthread_mutex_lock(&s_lock);
+	if (tem_br)
+		s_bitrate_proprio = (int)novo_br;
+	if (tem_enc)
+		snprintf(s_encoder_proprio, sizeof(s_encoder_proprio), "%s", novo_enc);
+	pthread_mutex_unlock(&s_lock);
 
 	/* Plan (config is only written under op_lock, so reading it here is safe). */
 	bool parar[MAX_SAIDAS] = {false};
@@ -667,7 +858,10 @@ void saidas_req_status(obs_data_t *response_data)
 		obs_data_release(it);
 	}
 	bool multitrack = s_multitrack;
+	char enc_uso[MAX_ENC_ID];
+	snprintf(enc_uso, sizeof(enc_uso), "%s", s_enc_em_uso);
 	pthread_mutex_unlock(&s_lock);
+	obs_data_set_string(response_data, "encoder_proprio", enc_uso);
 
 	obs_data_set_bool(response_data, "ao_vivo", obs_frontend_streaming_active());
 	obs_data_set_bool(response_data, "multitrack", multitrack);
