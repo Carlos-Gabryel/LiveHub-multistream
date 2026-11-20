@@ -9,7 +9,7 @@ O plugin registra no obs-websocket (v5) o vendor **`livehub-multistream`**. Os c
 
 A resposta chega em `responseData.responseData`. Para receber os eventos do vendor, o cliente precisa assinar `EventSubscription::Vendors` (`1 << 9` = 512).
 
-**Versão da API: 3** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio` e `encoder_proprio` no `saidas.status`).
+**Versão da API: 3** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio`, `modo_encoder` e `encoder_proprio`/`modo_encoder` no `saidas.status`).
 
 ## Requests
 
@@ -23,7 +23,8 @@ Request:
 ```json
 {"saidas": [
   {"id": "youtube", "nome": "YouTube", "servidor": "rtmps://a.rtmps.youtube.com:443/live2", "key": "xxxx", "ativo": true}
-]}
+],
+ "bitrate_proprio": 6000, "encoder_proprio": "", "modo_encoder": "auto"}
 ```
 - `id`: `^[a-z0-9_-]{1,32}$`, único na lista. No máximo 8 saídas.
 - `servidor`: começa com `rtmp://` ou `rtmps://`, até 300 caracteres. `key`: 1–300 caracteres, sem espaço nem quebra de linha. `nome`: até 40 caracteres.
@@ -62,6 +63,7 @@ Quando a saída principal é multitrack (Enhanced Broadcasting da Twitch), não 
 - No modo automático, a escolha do encoder segue esta ordem, usando o primeiro que existir: `obs_nvenc_h264_tex`, `jim_nvenc`, `h264_texture_amf`, `obs_qsv11_v2`, `obs_qsv11`, `obs_x264`.
 - Configuração do encoder de vídeo: `rate_control` CBR, `bitrate` = bitrate_proprio, `keyint_sec` 2. Áudio: AAC (`ffmpeg_aac`, ou `CoreAudio_AAC` se existir) a 160 kbps, na trilha/mixer 0.
 - Valores inválidos respondem `{"ok": false, "erro": "bitrate_invalido"}` ou `"encoder_invalido"`; ambos ficam salvos em `saidas.json`. Se uma extra já está no ar com encoders próprios, mudanças de bitrate/encoder só valem no próximo início.
+- `"modo_encoder"` (opcional, padrão `"auto"`): `"auto"` compartilha os encoders da principal e só usa os próprios quando ela é multitrack; `"proprio"` usa sempre o par próprio, mesmo com encoder simples na principal (útil para um bitrate diferente nas extras). Valor inválido responde `"modo_encoder_invalido"`; se ausente, mantém o valor atual; fica salvo em `saidas.json`. O `saidas.status` ganha `"modo_encoder"`, e `multitrack` continua refletindo só a saída principal.
 - Os encoders próprios são criados quando a primeira saída extra inicia no modo multitrack e liberados quando a última para.
 - O `saidas.status` ganha `"encoder_proprio": "<id em uso ou \"\">"`. Com codificador próprio, as extras **não ficam em erro**: `multitrack: true` passa a ser só informativo. O erro `multitrack` só acontece se nenhum encoder puder ser criado (aí o erro é `sem_encoder`).
 

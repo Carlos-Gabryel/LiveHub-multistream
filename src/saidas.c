@@ -86,6 +86,7 @@ static pthread_mutex_t s_op_lock;
 static bool s_mutex_ok = false;
 static bool s_principal_on = false;
 static bool s_multitrack = false;
+static bool s_modo_proprio = false; /* modo_encoder: false = "auto", true = "proprio". Protected by lock. */
 static saidas_emit_fn s_emit = NULL;
 
 /* ---------- helpers ---------- */
@@ -258,6 +259,7 @@ static void salvar_config(void) /* caller holds op_lock */
 	pthread_mutex_lock(&s_lock);
 	obs_data_set_int(raiz, "bitrate_proprio", s_bitrate_proprio);
 	obs_data_set_string(raiz, "encoder_proprio", s_encoder_proprio);
+	obs_data_set_string(raiz, "modo_encoder", s_modo_proprio ? "proprio" : "auto");
 	pthread_mutex_unlock(&s_lock);
 
 	char *dir = obs_module_config_path("");
@@ -288,6 +290,7 @@ void saidas_carregar(void)
 										: BITRATE_PADRAO;
 		const char *enc = obs_data_get_string(raiz, "encoder_proprio");
 		pthread_mutex_lock(&s_lock);
+		s_modo_proprio = strcmp(obs_data_get_string(raiz, "modo_encoder"), "proprio") == 0;
 		s_bitrate_proprio = bitrate_valido(br) ? (int)br : BITRATE_PADRAO;
 		if (strlen(enc) < MAX_ENC_ID)
 			snprintf(s_encoder_proprio, sizeof(s_encoder_proprio), "%s", enc);
@@ -568,16 +571,19 @@ static void iniciar_slot(int i)
 	if (principal)
 		obs_output_release(principal);
 
-	if (!venc) {
-		/* Multitrack main output (e.g. Twitch Enhanced Broadcasting): use the plugin's own encoder pair. */
-		pthread_mutex_lock(&s_lock);
-		s_multitrack = true;
-		pthread_mutex_unlock(&s_lock);
+	pthread_mutex_lock(&s_lock);
+	bool modo_proprio = s_modo_proprio;
+	if (!venc)
+		s_multitrack = true; /* s_multitrack always reflects the main output */
+	pthread_mutex_unlock(&s_lock);
+
+	if (!venc || modo_proprio) {
+		/* Multitrack main output (e.g. Twitch Enhanced Broadcasting) or "proprio" mode: use the plugin's own encoder pair. */
 		if (!obter_proprios(s, &venc, &aenc)) {
 			mudar_estado(s, NULL, E_ERRO, ERR_SEM_ENCODER, false);
 			return;
 		}
-		obs_log(LOG_INFO, "saida '%s': main output is multitrack, using own encoders", id);
+		obs_log(LOG_INFO, "saida '%s': using own encoders (%s)", id, modo_proprio ? "proprio mode" : "main output is multitrack");
 	} else if (!aenc) {
 		obs_log(LOG_WARNING, "saida '%s': main output has no audio encoder", id);
 		mudar_estado(s, NULL, E_ERRO, ERR_SEM_ENCODER, false);
@@ -730,6 +736,17 @@ void saidas_req_definir(obs_data_t *request_data, obs_data_t *response_data)
 		responder_erro(response_data, "encoder_invalido");
 		return;
 	}
+	bool tem_modo = obs_data_has_user_value(request_data, "modo_encoder");
+	bool novo_modo = false;
+	if (tem_modo) {
+		const char *m = obs_data_get_string(request_data, "modo_encoder");
+		if (strcmp(m, "proprio") == 0)
+			novo_modo = true;
+		else if (strcmp(m, "auto") != 0) {
+			responder_erro(response_data, "modo_encoder_invalido");
+			return;
+		}
+	}
 
 	pthread_mutex_lock(&s_op_lock);
 	pthread_mutex_lock(&s_lock);
@@ -737,6 +754,8 @@ void saidas_req_definir(obs_data_t *request_data, obs_data_t *response_data)
 		s_bitrate_proprio = (int)novo_br;
 	if (tem_enc)
 		snprintf(s_encoder_proprio, sizeof(s_encoder_proprio), "%s", novo_enc);
+	if (tem_modo)
+		s_modo_proprio = novo_modo;
 	pthread_mutex_unlock(&s_lock);
 
 	/* Plan (config is only written under op_lock, so reading it here is safe). */
@@ -858,10 +877,12 @@ void saidas_req_status(obs_data_t *response_data)
 		obs_data_release(it);
 	}
 	bool multitrack = s_multitrack;
+	bool modo_proprio = s_modo_proprio;
 	char enc_uso[MAX_ENC_ID];
 	snprintf(enc_uso, sizeof(enc_uso), "%s", s_enc_em_uso);
 	pthread_mutex_unlock(&s_lock);
 	obs_data_set_string(response_data, "encoder_proprio", enc_uso);
+	obs_data_set_string(response_data, "modo_encoder", modo_proprio ? "proprio" : "auto");
 
 	obs_data_set_bool(response_data, "ao_vivo", obs_frontend_streaming_active());
 	obs_data_set_bool(response_data, "multitrack", multitrack);
