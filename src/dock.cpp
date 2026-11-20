@@ -182,7 +182,8 @@ void aplicarIcone(QLabel *l, const QString &id, const QString &nome)
 	if (l->property("chave").toString() == chave)
 		return;
 	l->setProperty("chave", chave);
-	l->setToolTip(nome);
+	l->setTextFormat(Qt::PlainText);
+	l->setToolTip(nome.toHtmlEscaped());
 	l->setAccessibleName(nome);
 	QPixmap pm;
 	if (!id.isEmpty()) {
