@@ -13,6 +13,8 @@ A resposta chega em `responseData.responseData`. Para receber os eventos do vend
 
 **API 4** (painel do OBS): adiciona `saida.iniciar`/`saida.parar`, o campo `kbps` em cada saída do `saidas.status` e o bloco `principal`.
 
+**API 5** (saídas personalizadas e formato): cada saída aceita `"formato": "horizontal" | "vertical"` (padrão `horizontal`), e ids livres como `custom1`…`custom5` para destinos personalizados (ex.: Restream). Enquanto o canvas vertical não existir, uma saída `vertical` não inicia e fica `estado: "erro"`, `erro: "vertical_indisponivel"`. O `saidas.status` devolve `formato` em cada saída.
+
 ## Requests
 
 ### `saida.iniciar` / `saida.parar` (API 4)
@@ -55,7 +57,7 @@ Resposta (**nunca inclui a key**):
 - `ao_vivo`: a saída principal do OBS está transmitindo.
 - `multitrack`: a saída principal não tem encoder de vídeo simples, como no Enhanced Broadcasting da Twitch. Nesse caso as extras usam o codificador próprio (ver abaixo).
 - `estado`: `parado` | `conectando` | `ao_vivo` | `reconectando` | `erro`.
-- `erro`: `""` | `key_invalida` | `falha_conexao` | `desconectado` | `sem_encoder` | `multitrack` | `outro`.
+- `erro`: `""` | `key_invalida` | `falha_conexao` | `desconectado` | `sem_encoder` | `multitrack` | `vertical_indisponivel` | `outro`.
 - `desde`: momento (unix, em segundos) em que a saída entrou `ao_vivo`. Fica `0` fora do ar.
 - `kbps` (API 4): bitrate de saída atual, calculado pelo plugin com média dos últimos ~3 s. Fica `0` fora do ar.
 - `principal` (API 4): `{"plataforma": "twitch"|"youtube"|"kick"|"", "ao_vivo": bool, "kbps": int, "quadros_perdidos": int}`. A plataforma é detectada pelo serviço de transmissão do OBS: `rtmp_common` pelo nome do serviço, ou `rtmp_custom` pelo host do servidor; vazio se não reconhecer. No `rtmp_custom`, hosts `global-contribute.live-video.net` contam como `kick`.
