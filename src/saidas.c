@@ -1021,8 +1021,7 @@ static bool contem_ci(const char *texto, const char *procurado)
 	return false;
 }
 
-/* Set on OBS_FRONTEND_EVENT_FINISHED_LOADING. Before that, calling obs_frontend_get_streaming_service()
- * makes OBS create an empty placeholder service, which crashed other plugins (Aitum Multistream) at startup. */
+/* Set on OBS_FRONTEND_EVENT_FINISHED_LOADING: frontend queries (streaming service/output) only after that. */
 static volatile bool s_frontend_pronto = false;
 
 void saidas_frontend_pronto(bool pronto)
@@ -1067,7 +1066,8 @@ static const char *detectar_plataforma(void)
 	}
 	if (st)
 		obs_data_release(st);
-	obs_service_release(svc);
+	/* obs_frontend_get_streaming_service() does NOT add a reference: never release svc here.
+	 * Releasing it freed OBS's live streaming service (crash in OBS/other plugins). */
 	return res;
 }
 

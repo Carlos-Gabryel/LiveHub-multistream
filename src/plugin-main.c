@@ -52,6 +52,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
 		saidas_frontend_pronto(true);
+		lhms_dock_registrar(); /* frontend events run on the Qt UI thread */
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		saidas_principal_iniciou();
@@ -185,7 +186,7 @@ void obs_module_post_load(void)
 	/* Extra outputs work even without obs-websocket (config is loaded from disk). */
 	saidas_carregar();
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
-	lhms_dock_registrar(); /* post_load runs on the Qt UI thread */
+	/* The dock is registered on OBS_FRONTEND_EVENT_FINISHED_LOADING, once the frontend is ready. */
 
 	/* Vendor registration must happen after obs-websocket has loaded. */
 	if (obs_websocket_get_api_version() < LHMS_WS_MIN_API) {
