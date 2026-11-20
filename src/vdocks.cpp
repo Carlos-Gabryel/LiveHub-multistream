@@ -67,6 +67,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QShowEvent>
 #include <QStringList>
 #include <QStyle>
+#include <QPointer>
 #include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -254,7 +255,7 @@ std::string ativaStd()
 struct Hub {
 	std::string cena;
 	int64_t sel = 0;
-	std::vector<std::pair<void *, std::function<void()>>> ouvintes;
+	std::vector<std::pair<QPointer<QObject>, std::function<void()>>> ouvintes;
 
 	int64_t selecionado() const { return cena == ativaStd() ? sel : 0; }
 	void selecionar(int64_t id)
@@ -266,13 +267,14 @@ struct Hub {
 		sel = id;
 		auto copia = ouvintes;
 		for (auto &o : copia)
-			o.second();
+			if (o.first) /* owner already destroyed: skip */
+				o.second();
 	}
-	void ouvir(void *dono, std::function<void()> f) { ouvintes.emplace_back(dono, std::move(f)); }
-	void parar(void *dono)
+	void ouvir(QObject *dono, std::function<void()> f) { ouvintes.emplace_back(dono, std::move(f)); }
+	void parar(QObject *dono)
 	{
 		ouvintes.erase(std::remove_if(ouvintes.begin(), ouvintes.end(),
-					      [dono](const auto &o) { return o.first == dono; }),
+					      [dono](const auto &o) { return !o.first || o.first == dono; }),
 			       ouvintes.end());
 	}
 };
@@ -414,7 +416,8 @@ public:
 			QObject::connect(j, &QWindow::visibleChanged, this, [this](bool v) {
 				if (!v) {
 #if !defined(_WIN32) && !defined(__APPLE__)
-					display_ = nullptr; /* the surface is gone, nothing left to destroy */
+					/* the surface is gone: nothing to destroy, but still unhook the callback */
+					destruirDisplay(false);
 #endif
 					return;
 				}
@@ -424,6 +427,7 @@ public:
 					redimensionar();
 			});
 			QObject::connect(j, &QWindow::screenChanged, this, [this](QScreen *) {
+				atualizarCacheQt();
 				destruirDisplay();
 				criarDisplay();
 			});
@@ -469,19 +473,31 @@ public:
 		destruindo_ = false;
 	}
 
-	void destruirDisplay()
+	/* The single path that drops the display. Order matters: the draw callback must be gone (and the display
+	 * destroyed, which waits for the graphics thread) before the GPU quad is freed. `superficieViva` is false
+	 * when the native surface is already gone (Wayland): the display is only detached, not destroyed. */
+	void destruirDisplay(bool superficieViva = true)
 	{
+		if (display_) {
+			obs_display_remove_draw_callback(display_, &Visor::desenhar, this);
+			if (superficieViva)
+				obs_display_destroy(display_);
+			display_ = nullptr;
+		}
 		if (quad_) {
 			obs_enter_graphics();
 			gs_vertexbuffer_destroy(quad_);
-			obs_leave_graphics();
 			quad_ = nullptr;
+			obs_leave_graphics();
 		}
-		if (display_) {
-			obs_display_remove_draw_callback(display_, &Visor::desenhar, this);
-			obs_display_destroy(display_);
-			display_ = nullptr;
-		}
+	}
+
+	/* UI thread: refreshes the Qt-derived values the graphics thread reads (never call Qt from the callback). */
+	void atualizarCacheQt()
+	{
+		const double d = devicePixelRatioF();
+		std::lock_guard<std::mutex> g(ovMtx_);
+		dprCache_ = d;
 	}
 
 	void criarDisplay()
@@ -491,6 +507,7 @@ public:
 		QWindow *j = windowHandle();
 		if (!j || !j->isExposed())
 			return;
+		atualizarCacheQt();
 		QSize tam = tamanhoPixels(this);
 		if (tam.width() < 1 || tam.height() < 1)
 			return;
@@ -551,6 +568,7 @@ protected:
 	void resizeEvent(QResizeEvent *e) override
 	{
 		QWidget::resizeEvent(e);
+		atualizarCacheQt();
 		sincronizar();
 		if (isVisible())
 			redimensionar();
@@ -582,7 +600,9 @@ protected:
 			if (alvo) {
 				const vertical_item copia = *alvo; /* the snapshot is rebuilt by the selection change */
 				hub().selecionar(copia.id);
-				menuContexto(copia, e->globalPosition().toPoint());
+				const QPoint pos = e->globalPosition().toPoint();
+				/* let the press handler return before any menu/dialog shows */
+				QTimer::singleShot(0, this, [this, copia, pos] { menuContexto(copia, pos); });
 			}
 			return;
 		}
@@ -671,8 +691,7 @@ protected:
 			dy = float(step);
 			break;
 		case Qt::Key_Delete: {
-			vertical_item copia = *sel;
-			removerItem(copia);
+			removerItem(*sel);
 			return;
 		}
 		default:
@@ -699,10 +718,12 @@ private:
 	std::mutex ovMtx_;
 	bool ovTem_ = false;
 	matrix4 ovCaixa_ = {};
-	gs_vertbuffer_t *quad_ = nullptr; /* unit square, created/destroyed with the display */
+	double dprCache_ = 1.0;           /* devicePixelRatioF() copy for the graphics thread (guarded by ovMtx_) */
+	gs_vertbuffer_t *quad_ = nullptr; /* unit square; graphics thread only (lazy), freed in destruirDisplay */
 
 	std::vector<vertical_item> itens_; /* snapshot, bottom first */
 	std::string cenaEdicao_;
+	std::string cenaMenu_; /* scene the context menu was opened on */
 	Modo modo_ = Modo::Nenhum;
 	bool moveu_ = false;
 	vertical_item base_ = {};
@@ -720,11 +741,13 @@ private:
 	void desenharSelecao(float escalaPx)
 	{
 		matrix4 caixa;
+		double dprC;
 		{
 			std::lock_guard<std::mutex> g(ovMtx_);
 			if (!ovTem_)
 				return;
 			caixa = ovCaixa_;
+			dprC = dprCache_;
 		}
 		if (!quad_) {
 			gs_render_start(true);
@@ -738,7 +761,7 @@ private:
 			return;
 		gs_effect_t *solido = obs_get_base_effect(OBS_EFFECT_SOLID);
 		gs_eparam_t *cor = gs_effect_get_param_by_name(solido, "color");
-		const float dpr = float(devicePixelRatioF());
+		const float dpr = float(dprC);
 		const float esp = 2.0f * dpr / escalaPx; /* 2 logical px of line, in canvas units */
 		const float lado = 9.0f * dpr / escalaPx;
 
@@ -779,6 +802,7 @@ private:
 				}
 			}
 		}
+		gs_load_vertexbuffer(nullptr);
 	}
 
 	static vec3 pt(float x, float y, const matrix4 &m)
@@ -808,7 +832,9 @@ private:
 		if (modo_ == Modo::Nenhum)
 			cenaEdicao_ = cena;
 		const vertical_item *sel = achar(hub().selecionado());
+		const double d = devicePixelRatioF();
 		std::lock_guard<std::mutex> g(ovMtx_);
+		dprCache_ = d;
 		ovTem_ = sel != nullptr && sel->video;
 		if (ovTem_)
 			ovCaixa_ = sel->caixa;
@@ -1069,10 +1095,22 @@ private:
 	void aplicarPreset(const vertical_item &it,
 			   const std::function<void(obs_transform_info &, obs_sceneitem_crop &)> &f)
 	{
-		base_ = it;
-		cenaEdicao_ = ativaStd();
-		obs_transform_info ti = it.ti;
-		obs_sceneitem_crop cr = it.crop;
+		/* re-fetch by scene name + id: the scene/item may have changed while the menu was open */
+		const std::string cena = ativaStd();
+		if (cena != cenaMenu_)
+			return;
+		std::vector<vertical_item> v(MAX_ITENS_UI);
+		const size_t n = vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
+		const vertical_item *atual = nullptr;
+		for (size_t i = 0; i < n; i++)
+			if (v[i].id == it.id)
+				atual = &v[i];
+		if (!atual)
+			return;
+		base_ = *atual;
+		cenaEdicao_ = cena;
+		obs_transform_info ti = atual->ti;
+		obs_sceneitem_crop cr = atual->crop;
 		f(ti, cr);
 		aplicar(ti, cr);
 		vertical_alteracao_concluida();
@@ -1081,7 +1119,10 @@ private:
 	void menuContexto(const vertical_item &it, const QPoint &global)
 	{
 		const float W = float(VERTICAL_LARGURA), H = float(VERTICAL_ALTURA);
-		QMenu menu(this);
+		cenaMenu_ = ativaStd();
+		auto *menuPtr = new QMenu(this); /* popup() returns at once; the menu deletes itself on close */
+		menuPtr->setAttribute(Qt::WA_DeleteOnClose);
+		QMenu &menu = *menuPtr;
 		auto limites = [this](const vertical_item &i, vec3 &tl, vec3 &br) {
 			limitesTela(i.caixa, tl, br);
 		};
@@ -1139,18 +1180,36 @@ private:
 		menu.addSeparator();
 		a = menu.addAction(T("Remover"));
 		QObject::connect(a, &QAction::triggered, this, [this, copia] { removerItem(copia); });
-		menu.exec(global);
+		menu.popup(global);
 	}
 
 	void removerItem(const vertical_item &it)
 	{
-		std::string cena = ativaStd();
-		if (!confirmar(this, T("Remover fonte"), T("Remover \"%1\" desta cena vertical?").arg(nomeUi(it.nome)),
-			       T("Remover")))
-			return;
-		vertical_item_remover(cena.c_str(), it.id);
-		hub().selecionar(0);
-		recarregar();
+		/* copies only: the confirmation runs after the event handler returned, and the item may vanish */
+		const std::string cena = ativaStd();
+		const int64_t id = it.id;
+		const QString nome = nomeUi(it.nome);
+		QPointer<Visor> self(this);
+		QTimer::singleShot(0, this, [self, cena, id, nome] {
+			if (!self)
+				return;
+			if (!confirmar(self, T("Remover fonte"), T("Remover \"%1\" desta cena vertical?").arg(nome),
+				       T("Remover")))
+				return;
+			if (!self || ativaStd() != cena)
+				return;
+			std::vector<vertical_item> v(MAX_ITENS_UI);
+			const size_t n = vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
+			bool existe = false;
+			for (size_t i = 0; i < n; i++)
+				if (v[i].id == id)
+					existe = true;
+			if (!existe)
+				return;
+			vertical_item_remover(cena.c_str(), id);
+			hub().selecionar(0);
+			self->recarregar();
+		});
 	}
 
 	void atualizarCursor(const vec2 &p)
@@ -1575,16 +1634,23 @@ private:
 
 	void removerAtiva()
 	{
-		std::string a = ativaNome();
+		const std::string a = ativaNome();
 		if (a.empty())
 			return;
-		if (!confirmar(this, T("Remover cena"), T("Remover a cena \"%1\" e seus itens?").arg(nomeUi(a.c_str())),
-			       T("Remover")))
-			return;
-		const char *e = vertical_cena_remover(a.c_str());
-		if (e)
-			aviso(this, e);
-		atualizar();
+		QPointer<DockCenas> self(this);
+		QTimer::singleShot(0, this, [self, a] {
+			if (!self)
+				return;
+			if (!confirmar(self, T("Remover cena"),
+				       T("Remover a cena \"%1\" e seus itens?").arg(nomeUi(a.c_str())), T("Remover")))
+				return;
+			if (!self)
+				return;
+			const char *e = vertical_cena_remover(a.c_str()); /* by name: fails cleanly if it vanished */
+			if (e)
+				aviso(self, e);
+			self->atualizar();
+		});
 	}
 
 	void ativar(const std::string &nome)
@@ -1937,13 +2003,29 @@ private:
 				atualizar();
 			});
 			QObject::connect(remove, &QPushButton::clicked, this, [this, cena, id, nomeItem] {
-				if (!confirmar(this, T("Remover fonte"),
-					       T("Remover \"%1\" desta cena vertical?").arg(nomeItem), T("Remover")))
-					return;
-				vertical_item_remover(cena.c_str(), id);
-				if (hub().selecionado() == id)
-					hub().selecionar(0);
-				atualizar();
+				QPointer<DockFontes> self(this);
+				QTimer::singleShot(0, this, [self, cena, id, nomeItem] {
+					if (!self)
+						return;
+					if (!confirmar(self, T("Remover fonte"),
+						       T("Remover \"%1\" desta cena vertical?").arg(nomeItem),
+						       T("Remover")))
+						return;
+					if (!self || ativaStd() != cena)
+						return;
+					std::vector<vertical_item> v(MAX_ITENS_UI);
+					const size_t n = vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
+					bool existe = false;
+					for (size_t i = 0; i < n; i++)
+						if (v[i].id == id)
+							existe = true;
+					if (!existe)
+						return;
+					vertical_item_remover(cena.c_str(), id);
+					if (hub().selecionado() == id)
+						hub().selecionar(0);
+					self->atualizar();
+				});
 			});
 		}
 		linhas->addStretch(1);
