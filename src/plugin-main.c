@@ -22,10 +22,14 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #define LHMS_VENDOR_NAME "livehub-multistream"
 #define LHMS_API_VERSION 1
+#define LHMS_WS_MIN_API 2 /* obs-websocket API version with vendor requests */
 #define LHMS_OBS_MIN_VERSION MAKE_SEMANTIC_VERSION(31, 1, 0)
 
 OBS_DECLARE_MODULE()
 OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
+
+static obs_websocket_vendor s_vendor;
+static bool lhms_ativo = false;
 
 static void request_status(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
 {
@@ -55,13 +59,22 @@ bool obs_module_load(void)
 		return false;
 	}
 
+	lhms_ativo = true;
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);
 	return true;
 }
 
 void obs_module_post_load(void)
 {
+	if (!lhms_ativo)
+		return;
+
 	/* Vendor registration must happen after obs-websocket has loaded. */
+	if (obs_websocket_get_api_version() < LHMS_WS_MIN_API) {
+		obs_log(LOG_WARNING, "obs-websocket API too old (need >= %d); vendor not registered", LHMS_WS_MIN_API);
+		return;
+	}
+
 	obs_websocket_vendor vendor = obs_websocket_register_vendor(LHMS_VENDOR_NAME);
 	if (!vendor) {
 		obs_log(LOG_WARNING, "obs-websocket not available (missing or disabled); vendor '%s' not registered",
@@ -69,13 +82,20 @@ void obs_module_post_load(void)
 		return;
 	}
 
-	if (!obs_websocket_vendor_register_request(vendor, "status", request_status, NULL))
+	if (!obs_websocket_vendor_register_request(vendor, "status", request_status, NULL)) {
 		obs_log(LOG_WARNING, "failed to register request 'status'");
-	else
-		obs_log(LOG_INFO, "obs-websocket vendor '%s' registered", LHMS_VENDOR_NAME);
+		return;
+	}
+	s_vendor = vendor;
+	obs_log(LOG_INFO, "obs-websocket vendor '%s' registered", LHMS_VENDOR_NAME);
 }
 
 void obs_module_unload(void)
 {
+	if (s_vendor) {
+		obs_websocket_vendor_unregister_request(s_vendor, "status");
+		s_vendor = NULL;
+	}
+	lhms_ativo = false;
 	obs_log(LOG_INFO, "plugin unloaded");
 }
