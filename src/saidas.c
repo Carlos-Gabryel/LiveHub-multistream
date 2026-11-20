@@ -1021,10 +1021,26 @@ static bool contem_ci(const char *texto, const char *procurado)
 	return false;
 }
 
+/* Set on OBS_FRONTEND_EVENT_FINISHED_LOADING. Before that, calling obs_frontend_get_streaming_service()
+ * makes OBS create an empty placeholder service, which crashed other plugins (Aitum Multistream) at startup. */
+static volatile bool s_frontend_pronto = false;
+
+void saidas_frontend_pronto(bool pronto)
+{
+	os_atomic_set_bool(&s_frontend_pronto, pronto);
+}
+
+static bool frontend_pronto(void)
+{
+	return os_atomic_load_bool(&s_frontend_pronto);
+}
+
 /* Detects the platform of the main output's streaming service. Returns a static string. */
 static const char *detectar_plataforma(void)
 {
 	const char *res = "";
+	if (!frontend_pronto())
+		return res;
 	obs_service_t *svc = obs_frontend_get_streaming_service();
 	if (!svc)
 		return res;
@@ -1061,7 +1077,7 @@ void saidas_principal_info(struct principal_info *out)
 	if (!s_mutex_ok)
 		return;
 	snprintf(out->plataforma, sizeof(out->plataforma), "%s", detectar_plataforma());
-	out->ao_vivo = obs_frontend_streaming_active();
+	out->ao_vivo = frontend_pronto() && obs_frontend_streaming_active();
 	pthread_mutex_lock(&s_lock);
 	out->kbps = out->ao_vivo ? s_principal_kbps : 0;
 	out->quadros_perdidos = out->ao_vivo ? s_principal_perdidos : 0;
@@ -1100,7 +1116,7 @@ static int amostrar(struct amostrador *a, uint64_t t, uint64_t bytes)
 static void amostrar_tudo(void)
 {
 	uint64_t agora = os_gettime_ns();
-	bool vivo = obs_frontend_streaming_active();
+	bool vivo = frontend_pronto() && obs_frontend_streaming_active();
 	uint64_t pbytes = 0;
 	int pperdidos = 0;
 

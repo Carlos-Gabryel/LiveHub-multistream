@@ -74,6 +74,7 @@ bool saidas_parar_manual(const char *id, const char **erro);
 
 /* Stops the bitrate sampler thread (also done by saidas_liberar). */
 void saidas_amostrador_parar(void);
+void saidas_frontend_pronto(bool pronto);
 
 #ifdef __cplusplus
 }

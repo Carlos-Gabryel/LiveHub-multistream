@@ -50,6 +50,9 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 	UNUSED_PARAMETER(private_data);
 
 	switch (event) {
+	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		saidas_frontend_pronto(true);
+		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		saidas_principal_iniciou();
 		break;
@@ -57,6 +60,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		saidas_principal_parando();
 		break;
 	case OBS_FRONTEND_EVENT_EXIT: {
+		saidas_frontend_pronto(false);
 		/* Stop every extra output before unregistering. */
 		saidas_parar_tudo();
 		saidas_amostrador_parar();
