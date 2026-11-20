@@ -17,6 +17,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 */
 
 #include <obs-module.h>
+#include <obs-frontend-api.h>
 #include <plugin-support.h>
 #include "vendor/obs-websocket-api.h"
 
@@ -31,10 +32,29 @@ OBS_MODULE_USE_DEFAULT_LOCALE(PLUGIN_NAME, "en-US")
 static obs_websocket_vendor s_vendor;
 static bool lhms_ativo = false;
 
+/* EXIT fires while every module is still loaded: the safe moment to unregister from obs-websocket. */
+static void on_frontend_event(enum obs_frontend_event event, void *private_data)
+{
+	UNUSED_PARAMETER(private_data);
+
+	if (event != OBS_FRONTEND_EVENT_EXIT)
+		return;
+
+	obs_websocket_vendor vendor = s_vendor;
+	s_vendor = NULL;
+	if (vendor)
+		obs_websocket_vendor_unregister_request(vendor, "status");
+}
+
 static void request_status(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
 {
 	UNUSED_PARAMETER(request_data);
 	UNUSED_PARAMETER(priv_data);
+
+	if (!lhms_ativo) {
+		obs_data_set_bool(response_data, "success", false);
+		return;
+	}
 
 	obs_data_set_string(response_data, "plugin_versao", PLUGIN_VERSION);
 	obs_data_set_string(response_data, "obs_versao", obs_get_version_string());
@@ -87,15 +107,14 @@ void obs_module_post_load(void)
 		return;
 	}
 	s_vendor = vendor;
+	obs_frontend_add_event_callback(on_frontend_event, NULL);
 	obs_log(LOG_INFO, "obs-websocket vendor '%s' registered", LHMS_VENDOR_NAME);
 }
 
 void obs_module_unload(void)
 {
-	if (s_vendor) {
-		obs_websocket_vendor_unregister_request(s_vendor, "status");
-		s_vendor = NULL;
-	}
+	/* Do not touch obs-websocket here: it may already be unloaded. */
+	obs_frontend_remove_event_callback(on_frontend_event, NULL);
 	lhms_ativo = false;
 	obs_log(LOG_INFO, "plugin unloaded");
 }
