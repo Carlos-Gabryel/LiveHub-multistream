@@ -4,6 +4,8 @@ Plugin do OBS Studio usado pelo [LiveHub](https://livehub.cloud) para multistrea
 
 Fase 0: o plugin apenas registra o vendor `livehub-multistream` no obs-websocket e responde ao request `status` (versao do plugin, versao do OBS e versao da API). Requer OBS 31.1 ou mais novo.
 
+Fase 1: saidas extras (por exemplo YouTube e Kick) que reaproveitam o encoder da transmissao principal, sem segunda codificacao. Sao controladas pelo LiveHub via obs-websocket (`saidas.definir`, `saidas.status`, `saida.ligar` e o evento `saida_estado`), iniciam e param junto com a transmissao principal e ficam salvas em `saidas.json`. Veja o protocolo em [docs/PROTOCOLO.md](docs/PROTOCOLO.md).
+
 ## Licenca
 
 GPLv2 ou posterior.
