@@ -49,8 +49,10 @@ struct saida_info {
 	char id[33];
 	char nome[161];
 	bool ativo;
+	bool vertical;
 	const char *estado; /* static strings, same values as the protocol: parado|conectando|ao_vivo|reconectando|erro */
-	const char *erro;   /* "" | key_invalida | falha_conexao | desconectado | sem_encoder | multitrack | outro */
+	const char *
+		erro; /* "" | key_invalida | falha_conexao | desconectado | sem_encoder | multitrack | outro | vertical_indisponivel */
 	int kbps;
 	int quadros_perdidos;
 	bool usa_proprio;

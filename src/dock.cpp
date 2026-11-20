@@ -67,10 +67,12 @@ const char *ESTILO = R"(
 #lhmsRoot QLabel#mut11 { color:#a6a6b8; font-size:11px; }
 #lhmsRoot QLabel#nome { font-size:12px; font-weight:700; }
 #lhmsRoot QLabel#pill { background:#262631; color:#b9b9c8; border-radius:5px; padding:0 5px; font-size:10px; }
-#lhmsRoot QLabel#total { font-size:15px; font-weight:700; }
 #lhmsRoot QLabel#aovivo { color:#ff6369; font-size:12px; font-weight:700; }
 #lhmsRoot QPushButton { min-height:22px; max-height:24px; padding:0 10px; border-radius:6px; border:1px solid #3a3a48;
   background:#23232e; color:#ececf1; font-size:12px; font-weight:600; }
+#lhmsRoot QPushButton#btnCfg { min-height:20px; max-height:20px; padding:0 8px; font-size:11px; font-weight:400;
+  background:#17171f; border:1px solid #2a2a36; border-radius:6px; color:#a6a6b8; }
+#lhmsRoot QPushButton#btnCfg:hover { background:#1d1d27; color:#ececf1; }
 #lhmsRoot QPushButton:hover { background:#2d2d3a; }
 #lhmsRoot QPushButton:disabled { background:#23232e; color:#77778a; }
 #lhmsRoot QPushButton[acao="iniciar"] { background:#9146ff; border-color:#9146ff; color:#ffffff; }
@@ -134,13 +136,7 @@ private:
 	}
 };
 
-/* Sets text/style only when it changed (avoids flicker and needless relayout). */
-void setTextoSe(QLabel *l, const QString &t)
-{
-	if (l->text() != t)
-		l->setText(t);
-}
-
+/* Sets the style only when it changed (avoids flicker and needless relayout). */
 void setEstiloSe(QWidget *w, const QString &s)
 {
 	if (w->styleSheet() != s)
@@ -261,13 +257,17 @@ QString textoEstado(const QString &estado, const QString &erro)
 			return T("Sem codificador");
 		if (erro == "multitrack")
 			return T("Enhanced Broadcasting");
+		if (erro == "vertical_indisponivel")
+			return T("Aguardando o canvas vertical");
 		return T("Erro");
 	}
 	return T("Parado");
 }
 
-const char *corTexto(const QString &estado)
+const char *corTexto(const QString &estado, const QString &erro)
 {
+	if (estado == "erro" && erro == "vertical_indisponivel")
+		return "#f6c77a";
 	if (estado == "ao_vivo")
 		return "#6ff0a6";
 	if (estado == "conectando" || estado == "reconectando")
@@ -277,8 +277,10 @@ const char *corTexto(const QString &estado)
 	return "#b9b9c8";
 }
 
-const char *corBarra(const QString &estado)
+const char *corBarra(const QString &estado, const QString &erro)
 {
+	if (estado == "erro" && erro == "vertical_indisponivel")
+		return "#f0b45a";
 	if (estado == "ao_vivo")
 		return "#3ddc84";
 	if (estado == "conectando" || estado == "reconectando")
@@ -289,19 +291,6 @@ const char *corBarra(const QString &estado)
 bool estadoAtivo(const QString &estado)
 {
 	return estado == "ao_vivo" || estado == "conectando" || estado == "reconectando";
-}
-
-QString nomeEncoder(const QString &id)
-{
-	if (id == "obs_nvenc_h264_tex" || id == "jim_nvenc")
-		return "NVENC";
-	if (id == "h264_texture_amf")
-		return "AMD";
-	if (id == "obs_qsv11_v2" || id == "obs_qsv11")
-		return "QuickSync";
-	if (id == "obs_x264")
-		return "x264";
-	return id;
 }
 
 void setAcao(QPushButton *b, const char *acao)
@@ -315,9 +304,12 @@ void setAcao(QPushButton *b, const char *acao)
 
 struct Linha {
 	QString id;
+	bool vertical = false;
 	QFrame *raiz = nullptr;
 	QLabel *icone = nullptr;
+	LabelElidido *rotulo = nullptr;
 	QLabel *auto_ = nullptr;
+	QLabel *formato = nullptr;
 	LabelElidido *info = nullptr;
 	QPushButton *botao = nullptr;
 	QString barra;
@@ -336,13 +328,16 @@ public:
 		setStyleSheet(ESTILO);
 
 		auto *externo = new QVBoxLayout(this);
-		externo->setContentsMargins(0, 0, 0, 0);
+		externo->setSpacing(0);
 		auto *scroll = new QScrollArea(this);
 		scroll->setFrameShape(QFrame::NoFrame);
 		scroll->setWidgetResizable(true);
 		scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
 		scroll->viewport()->setAutoFillBackground(false);
-		externo->addWidget(scroll);
+		externo->addWidget(scroll, 1);
+		cfgRodape = criarBotaoConfig(this);
+		externo->addWidget(cfgRodape);
+		externo->setContentsMargins(0, 0, 0, 8);
 
 		auto *conteudo = new QWidget();
 		conteudo->setObjectName("lhmsConteudo");
@@ -372,22 +367,6 @@ public:
 		v2->addLayout(linhasLayout);
 		vazio = criarMudo(conteudo, T("Nenhuma plataforma extra configurada."));
 		v2->addWidget(vazio);
-		cfgVazio = criarBotaoConfig(conteudo);
-		v2->addWidget(cfgVazio, 0, Qt::AlignLeft);
-
-		/* Block 3: RESUMO */
-		QVBoxLayout *v3 = nullptr;
-		raiz->addWidget(criarBloco(conteudo, T("Resumo"), &v3));
-		auto *hT = new QHBoxLayout();
-		hT->addWidget(criarLabel(conteudo, "mut", T("Upload total")));
-		hT->addStretch(1);
-		uploadTotal = criarLabel(conteudo, "total");
-		hT->addWidget(uploadTotal);
-		v3->addLayout(hT);
-		codificador = criarMudo(conteudo, QString(), "mut11");
-		v3->addWidget(codificador);
-		cfgResumo = criarBotaoConfig(conteudo);
-		v3->addWidget(cfgResumo, 0, Qt::AlignLeft);
 
 		raiz->addStretch(1);
 
@@ -412,17 +391,15 @@ private:
 	LabelElidido *principalInfo = nullptr;
 	QVBoxLayout *linhasLayout = nullptr;
 	QLabel *vazio = nullptr;
-	QPushButton *cfgVazio = nullptr;
-	QPushButton *cfgResumo = nullptr;
-	QLabel *uploadTotal = nullptr;
-	QLabel *codificador = nullptr;
+	QPushButton *cfgRodape = nullptr;
 	QTimer *timer = nullptr;
 	std::vector<Linha *> linhas;
 
 	QPushButton *criarBotaoConfig(QWidget *pai)
 	{
-		auto *b = new QPushButton(T("Configurar no LiveHub"), pai);
+		auto *b = new QPushButton(T("⚙ Configurar no LiveHub"), pai);
 		b->setObjectName("btnCfg");
+		b->setFlat(true);
 		b->setCursor(Qt::PointingHandCursor);
 		QObject::connect(b, &QPushButton::clicked, this, [] { QDesktopServices::openUrl(QUrl(CONFIG_URL)); });
 		return b;
@@ -438,21 +415,30 @@ private:
 		linhas.clear();
 	}
 
-	void criarLinha(const QString &id)
+	void criarLinha(const QString &id, bool vertical)
 	{
 		Linha *l = new Linha;
 		l->id = id;
+		l->vertical = vertical;
 		QHBoxLayout *h = nullptr;
 		l->raiz = criarMoldura(this, &h);
 		l->icone = criarLabel(l->raiz, "nome");
+		l->rotulo = new LabelElidido(l->raiz, "mut11");
+		l->rotulo->setMaximumWidth(90);
+		l->rotulo->setVisible(id.startsWith("custom"));
 		l->auto_ = criarLabel(l->raiz, "pill", T("AUTO"));
 		l->auto_->setToolTip(T("Liga sozinha junto com a principal"));
+		l->formato = criarLabel(l->raiz, "pill", T("9:16"));
+		l->formato->setToolTip(T("Formato vertical"));
+		l->formato->setVisible(vertical);
 		l->info = new LabelElidido(l->raiz, "mut");
 		l->botao = new QPushButton(T("Iniciar"), l->raiz);
 		l->botao->setCursor(Qt::PointingHandCursor);
 		setAcao(l->botao, "iniciar");
 		h->addWidget(l->icone);
+		h->addWidget(l->rotulo);
 		h->addWidget(l->auto_);
+		h->addWidget(l->formato);
 		h->addWidget(l->info, 1);
 		h->addWidget(l->botao);
 
@@ -506,42 +492,45 @@ private:
 		else
 			principalInfo->setCompleto(T("Fora do ar — liga pelo botão do OBS"));
 
-		/* Rebuild rows only when the set of ids changes. */
+		/* Rebuild rows only when the set of ids or formats changes. */
 		QStringList novos;
 		for (size_t i = 0; i < n; i++)
-			novos << QString::fromUtf8(infos[i].id);
+			novos << QString::fromUtf8(infos[i].id) + (infos[i].vertical ? "|v" : "|h");
 		QStringList atuais;
 		for (const Linha *l : linhas)
-			atuais << l->id;
+			atuais << l->id + (l->vertical ? "|v" : "|h");
 		if (novos != atuais) {
 			limparLinhas();
-			for (const QString &id : novos)
-				criarLinha(id);
+			for (size_t i = 0; i < n; i++)
+				criarLinha(QString::fromUtf8(infos[i].id), infos[i].vertical);
 		}
 		vazio->setVisible(n == 0);
-		cfgVazio->setVisible(n == 0);
-		cfgResumo->setVisible(n != 0);
 
-		long long total = pi.kbps;
 		for (size_t i = 0; i < n && i < linhas.size(); i++) {
 			const saida_info &si = infos[i];
 			Linha *l = linhas[i];
 			QString estado = QString::fromUtf8(si.estado);
 			l->rodando = estadoAtivo(estado);
-			if (l->rodando)
-				total += si.kbps;
 
 			QString nomeL = QString::fromUtf8(si.nome);
 			QString nomeKnown = nomePlataforma(QString::fromUtf8(si.id));
-			aplicarIcone(l->icone, nomeKnown.isEmpty() ? QString() : QString::fromUtf8(si.id), nomeL);
+			bool custom = QString::fromUtf8(si.id).startsWith("custom");
+			aplicarIcone(l->icone,
+				     !nomeKnown.isEmpty() ? QString::fromUtf8(si.id)
+				     : custom             ? "custom"
+							  : QString(),
+				     nomeL);
+			if (custom)
+				l->rotulo->setCompleto(nomeL);
 			l->auto_->setVisible(si.ativo);
-			pintarBarra(l->raiz, &l->barra, corBarra(estado));
+			QString erroL = QString::fromUtf8(si.erro);
+			pintarBarra(l->raiz, &l->barra, corBarra(estado, erroL));
 			if (estado == "ao_vivo") {
 				setEstiloSe(l->info, "color:#a6a6b8;");
 				l->info->setCompleto(
 					T("%1 kbps · %2 perdidos").arg(num(si.kbps)).arg(num(si.quadros_perdidos)));
 			} else {
-				setEstiloSe(l->info, QString("color:%1;").arg(corTexto(estado)));
+				setEstiloSe(l->info, QString("color:%1;").arg(corTexto(estado, erroL)));
 				l->info->setCompleto(textoEstado(estado, QString::fromUtf8(si.erro)));
 			}
 			QString txtBotao = l->rodando ? T("Parar") : T("Iniciar");
@@ -554,14 +543,6 @@ private:
 			if (l->botao->isEnabled() != hab)
 				l->botao->setEnabled(hab);
 		}
-
-		setTextoSe(uploadTotal, T("%1 kbps").arg(num(total)));
-		if (pi.encoder_proprio[0])
-			setTextoSe(codificador, T("Codificador próprio: %1 · %2 kbps")
-							.arg(nomeEncoder(QString::fromUtf8(pi.encoder_proprio)))
-							.arg(num(pi.bitrate_proprio)));
-		else
-			setTextoSe(codificador, T("Codificador: o mesmo da principal"));
 	}
 };
 

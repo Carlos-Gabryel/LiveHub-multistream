@@ -52,12 +52,13 @@ enum erro {
 	ERR_DESCONECTADO,
 	ERR_SEM_ENCODER,
 	ERR_MULTITRACK,
-	ERR_OUTRO
+	ERR_OUTRO,
+	ERR_VERTICAL
 };
 
 static const char *estado_str[] = {"parado", "conectando", "ao_vivo", "reconectando", "erro"};
-static const char *erro_str[] = {"",           "key_invalida", "falha_conexao", "desconectado", "sem_encoder",
-				 "multitrack", "outro"};
+static const char *erro_str[] = {"",           "key_invalida", "falha_conexao",        "desconectado", "sem_encoder",
+				 "multitrack", "outro",        "vertical_indisponivel"};
 
 #define N_AMOSTRAS 3
 
@@ -75,6 +76,7 @@ struct saida {
 	char servidor[MAX_SERVIDOR + 1];
 	char key[MAX_KEY + 1];
 	bool ativo;
+	bool vertical;
 
 	obs_output_t *out;
 	obs_service_t *svc;
@@ -190,6 +192,11 @@ static const char *validar(obs_data_t *item, struct saida *dst)
 		return "key_invalida";
 	if (contar_caracteres(nome) > MAX_NOME || strlen(nome) >= sizeof(dst->nome))
 		return "nome_invalido";
+	const char *formato = obs_data_has_user_value(item, "formato") ? obs_data_get_string(item, "formato")
+								       : "horizontal";
+	if (strcmp(formato, "horizontal") != 0 && strcmp(formato, "vertical") != 0)
+		return "formato_invalido";
+	dst->vertical = strcmp(formato, "vertical") == 0;
 
 	snprintf(dst->id, sizeof(dst->id), "%s", id);
 	snprintf(dst->nome, sizeof(dst->nome), "%s", *nome ? nome : id);
@@ -206,6 +213,7 @@ static void copiar_cfg(struct saida *dst, const struct saida *src)
 	memcpy(dst->servidor, src->servidor, sizeof(dst->servidor));
 	memcpy(dst->key, src->key, sizeof(dst->key));
 	dst->ativo = src->ativo;
+	dst->vertical = src->vertical;
 }
 
 static bool encoder_existe(const char *id, enum obs_encoder_type tipo)
@@ -281,6 +289,7 @@ static void salvar_config(void) /* caller holds op_lock */
 		obs_data_set_string(it, "servidor", s->servidor);
 		obs_data_set_string(it, "key", s->key);
 		obs_data_set_bool(it, "ativo", s->ativo);
+		obs_data_set_string(it, "formato", s->vertical ? "vertical" : "horizontal");
 		obs_data_array_push_back(arr, it);
 		obs_data_release(it);
 	}
@@ -570,6 +579,12 @@ static void derrubar(int i, enum estado estado, enum erro erro)
 	mudar_estado(s, NULL, estado, erro, false);
 }
 
+/* The vertical canvas does not exist yet (phase 2 flips this). */
+static bool canvas_vertical_disponivel(void)
+{
+	return false;
+}
+
 /* Starts slot i. manual=true ignores "ativo" and works with the main output off (then it uses the own encoders).
  * Returns NULL on success (or when there is nothing to do) or an error reason. Caller holds op_lock. */
 static const char *iniciar_slot(int i, bool manual)
@@ -584,6 +599,16 @@ static const char *iniciar_slot(int i, bool manual)
 		return manual ? "id_desconhecido" : NULL;
 	}
 	bool principal_on = s_principal_on;
+	if (s->vertical && !canvas_vertical_disponivel()) {
+		bool novo = s->estado != E_ERRO || s->erro != ERR_VERTICAL;
+		char vid[MAX_ID + 1];
+		snprintf(vid, sizeof(vid), "%s", s->id);
+		pthread_mutex_unlock(&s_lock);
+		if (novo)
+			obs_log(LOG_WARNING, "saida '%s': vertical canvas unavailable, not starting", vid);
+		mudar_estado(s, NULL, E_ERRO, ERR_VERTICAL, false);
+		return "vertical_indisponivel";
+	}
 	if (s->out) {
 		if (s->estado != E_ERRO) {
 			pthread_mutex_unlock(&s_lock);
@@ -822,9 +847,10 @@ void saidas_req_definir(obs_data_t *request_data, obs_data_t *response_data)
 			continue;
 		}
 		bool conexao = strcmp(s->servidor, novas[k].servidor) != 0 || strcmp(s->key, novas[k].key) != 0;
-		if (conexao || !novas[k].ativo)
+		bool formato = s->vertical != novas[k].vertical;
+		if (conexao || formato || !novas[k].ativo)
 			parar[i] = true;
-		if (novas[k].ativo && (conexao || !s->ativo))
+		if (novas[k].ativo && (conexao || formato || !s->ativo))
 			iniciar[i] = true;
 	}
 
@@ -915,6 +941,7 @@ void saidas_req_status(obs_data_t *response_data)
 		obs_data_set_string(it, "id", s->id);
 		obs_data_set_string(it, "nome", s->nome);
 		obs_data_set_bool(it, "ativo", s->ativo);
+		obs_data_set_string(it, "formato", s->vertical ? "vertical" : "horizontal");
 		obs_data_set_string(it, "estado", estado_str[s->estado]);
 		obs_data_set_string(it, "erro", erro_str[s->erro]);
 		obs_data_set_int(it, "bytes", s->out ? (long long)obs_output_get_total_bytes(s->out) : 0);
@@ -998,6 +1025,7 @@ size_t saidas_snapshot(struct saida_info *out, size_t max)
 		snprintf(o->id, sizeof(o->id), "%s", s->id);
 		snprintf(o->nome, sizeof(o->nome), "%s", s->nome);
 		o->ativo = s->ativo;
+		o->vertical = s->vertical;
 		o->estado = estado_str[s->estado];
 		o->erro = erro_str[s->erro];
 		o->kbps = s->kbps;
