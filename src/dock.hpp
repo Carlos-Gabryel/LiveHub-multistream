@@ -24,6 +24,8 @@ extern "C" {
 
 /* Registers the "LiveHub Multistream" dock. Must be called on the Qt UI thread (obs_module_post_load). */
 void lhms_dock_registrar(void);
+/* Marks shutdown: button clicks are ignored from now on. Safe from any thread. */
+void lhms_dock_desligando(void);
 /* Removes the dock and waits for in-flight manual start/stop requests. Call on the UI thread. */
 void lhms_dock_remover(void);
 

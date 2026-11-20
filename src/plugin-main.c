@@ -61,6 +61,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		saidas_principal_parando();
 		break;
 	case OBS_FRONTEND_EVENT_EXIT: {
+		lhms_dock_desligando();
 		saidas_frontend_pronto(false);
 		/* Stop every extra output before unregistering. */
 		saidas_parar_tudo();
