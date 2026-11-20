@@ -21,10 +21,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <plugin-support.h>
 #include "vendor/obs-websocket-api.h"
 #include "saidas.h"
+#include "vertical.h"
 #include "dock.hpp"
 
 #define LHMS_VENDOR_NAME "livehub-multistream"
-#define LHMS_API_VERSION 5
+#define LHMS_API_VERSION 6
 #define LHMS_WS_MIN_API 2 /* obs-websocket API version with vendor requests */
 #define LHMS_OBS_MIN_VERSION MAKE_SEMANTIC_VERSION(31, 1, 0)
 
@@ -37,6 +38,11 @@ static bool lhms_ativo = false;
 static const char *const s_requests[] = {"status",      "saidas.definir", "saidas.status",
 					 "saida.ligar", "saida.iniciar",  "saida.parar"};
 
+/* Total number of registered requests: the 6 base ones + the vertical.* ones. */
+#define N_BASE_REQUESTS (sizeof(s_requests) / sizeof(s_requests[0]))
+
+static void desregistrar_requests(obs_websocket_vendor vendor);
+
 static void emitir_evento(const char *event_name, obs_data_t *event_data)
 {
 	obs_websocket_vendor vendor = s_vendor;
@@ -48,6 +54,9 @@ static void emitir_evento(const char *event_name, obs_data_t *event_data)
 static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 {
 	UNUSED_PARAMETER(private_data);
+
+	/* Vertical canvas: handles its own events (creation, collection switch, auto scene switch, teardown). */
+	vertical_evento(event);
 
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
@@ -69,13 +78,30 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		obs_websocket_vendor vendor = s_vendor;
 		s_vendor = NULL;
 		if (vendor)
-			for (size_t i = 0; i < sizeof(s_requests) / sizeof(s_requests[0]); i++)
-				obs_websocket_vendor_unregister_request(vendor, s_requests[i]);
+			desregistrar_requests(vendor);
 		break;
 	}
 	default:
 		break;
 	}
+}
+
+static void desregistrar_requests(obs_websocket_vendor vendor)
+{
+	for (size_t i = 0; i < N_BASE_REQUESTS; i++)
+		obs_websocket_vendor_unregister_request(vendor, s_requests[i]);
+	for (size_t i = 0; i < VERTICAL_REQUESTS_N; i++)
+		obs_websocket_vendor_unregister_request(vendor, VERTICAL_REQUESTS[i]);
+}
+
+static void request_vertical(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
+{
+	if (!lhms_ativo) {
+		obs_data_set_bool(response_data, "success", false);
+		return;
+	}
+	if (!vertical_request((const char *)priv_data, request_data, response_data))
+		obs_data_set_bool(response_data, "success", false);
 }
 
 static void request_status(obs_data_t *request_data, obs_data_t *response_data, void *priv_data)
@@ -186,6 +212,7 @@ void obs_module_post_load(void)
 
 	/* Extra outputs work even without obs-websocket (config is loaded from disk). */
 	saidas_carregar();
+	vertical_iniciar();
 	obs_frontend_add_event_callback(on_frontend_event, NULL);
 	/* The dock is registered on OBS_FRONTEND_EVENT_FINISHED_LOADING, once the frontend is ready. */
 
@@ -208,10 +235,12 @@ void obs_module_post_load(void)
 		  obs_websocket_vendor_register_request(vendor, "saida.ligar", request_saida_ligar, NULL) &&
 		  obs_websocket_vendor_register_request(vendor, "saida.iniciar", request_saida_iniciar, NULL) &&
 		  obs_websocket_vendor_register_request(vendor, "saida.parar", request_saida_parar, NULL);
+	for (size_t i = 0; ok && i < VERTICAL_REQUESTS_N; i++)
+		ok = obs_websocket_vendor_register_request(vendor, VERTICAL_REQUESTS[i], request_vertical,
+							   (void *)VERTICAL_REQUESTS[i]);
 	if (!ok) {
 		obs_log(LOG_WARNING, "failed to register vendor requests");
-		for (size_t i = 0; i < sizeof(s_requests) / sizeof(s_requests[0]); i++)
-			obs_websocket_vendor_unregister_request(vendor, s_requests[i]);
+		desregistrar_requests(vendor);
 		return;
 	}
 	s_vendor = vendor;
@@ -224,6 +253,7 @@ void obs_module_unload(void)
 	lhms_dock_remover();
 	obs_frontend_remove_event_callback(on_frontend_event, NULL);
 	lhms_ativo = false;
+	vertical_liberar();
 	saidas_liberar();
 	obs_log(LOG_INFO, "plugin unloaded");
 }

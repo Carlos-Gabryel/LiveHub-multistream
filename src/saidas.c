@@ -37,6 +37,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <errno.h>
 #include <ctype.h>
 #include "saidas.h"
+#include "vertical.h"
 
 #define MAX_SAIDAS 8
 #define MAX_ID 32
@@ -80,7 +81,8 @@ struct saida {
 
 	obs_output_t *out;
 	obs_service_t *svc;
-	bool usa_proprio; /* holds a reference on the plugin's own encoder pair */
+	bool usa_proprio; /* holds a reference on one of the plugin's own encoder pairs */
+	int par_idx;      /* which pair: 0 = horizontal (main video), 1 = vertical canvas */
 	enum estado estado;
 	enum erro erro;
 	long long desde;
@@ -98,10 +100,14 @@ struct saida {
 /* Own encoder pair (multitrack main output). Protected by lock; refs counts the slots using it. */
 static int s_bitrate_proprio = BITRATE_PADRAO;
 static char s_encoder_proprio[MAX_ENC_ID] = ""; /* "" = auto */
-static obs_encoder_t *s_venc = NULL;
-static obs_encoder_t *s_aenc = NULL;
-static int s_enc_refs = 0;
-static char s_enc_em_uso[MAX_ENC_ID] = "";
+struct par_enc {
+	obs_encoder_t *venc;
+	obs_encoder_t *aenc;
+	int refs;
+	char em_uso[MAX_ENC_ID];
+};
+/* [0] horizontal pair (main video), [1] vertical pair (vertical canvas video, shared by all vertical outputs). */
+static struct par_enc s_par[2];
 
 static const char *const s_auto_encoders[] = {"obs_nvenc_h264_tex", "jim_nvenc", "h264_texture_amf",
 					      "obs_qsv11_v2",       "obs_qsv11", "obs_x264"};
@@ -449,7 +455,7 @@ static void desconectar_sinais(struct saida *s, obs_output_t *out)
 
 /* ---------- start / stop (caller holds op_lock) ---------- */
 
-static obs_encoder_t *criar_video(const char *id, int bitrate)
+static obs_encoder_t *criar_video(const char *id, int bitrate, video_t *video)
 {
 	if (!encoder_existe(id, OBS_ENCODER_VIDEO))
 		return NULL;
@@ -460,7 +466,7 @@ static obs_encoder_t *criar_video(const char *id, int bitrate)
 	obs_encoder_t *e = obs_video_encoder_create(id, "livehub-ms-venc", st, NULL);
 	obs_data_release(st);
 	if (e)
-		obs_encoder_set_video(e, obs_get_video());
+		obs_encoder_set_video(e, video);
 	return e;
 }
 
@@ -476,21 +482,23 @@ static obs_encoder_t *criar_audio(void)
 	return e;
 }
 
-/* Takes a reference on the own encoder pair for slot s, creating it if needed. Caller holds op_lock and not lock.
- * Returns false when no encoder pair could be created. */
-static bool obter_proprios(struct saida *s, obs_encoder_t **venc, obs_encoder_t **aenc)
+/* Takes a reference on the own encoder pair (horizontal or vertical) for slot s, creating it if needed. Caller holds
+ * op_lock and not lock. Returns false when no encoder pair could be created. */
+static bool obter_proprios(struct saida *s, bool vertical, obs_encoder_t **venc, obs_encoder_t **aenc)
 {
 	char pedido[MAX_ENC_ID];
 	int bitrate;
+	struct par_enc *par = &s_par[vertical ? 1 : 0];
 
 	pthread_mutex_lock(&s_lock);
-	if (s_venc) {
+	if (par->venc) {
 		if (!s->usa_proprio) {
 			s->usa_proprio = true;
-			s_enc_refs++;
+			s->par_idx = vertical ? 1 : 0;
+			par->refs++;
 		}
-		*venc = s_venc;
-		*aenc = s_aenc;
+		*venc = par->venc;
+		*aenc = par->aenc;
 		pthread_mutex_unlock(&s_lock);
 		return true;
 	}
@@ -498,14 +506,20 @@ static bool obter_proprios(struct saida *s, obs_encoder_t **venc, obs_encoder_t 
 	bitrate = s_bitrate_proprio;
 	pthread_mutex_unlock(&s_lock);
 
+	video_t *video = vertical ? vertical_video() : obs_get_video();
+	if (!video) {
+		obs_log(LOG_WARNING, "own encoders: no %s video available", vertical ? "vertical canvas" : "main");
+		return false;
+	}
+
 	const char *usado = NULL;
 	obs_encoder_t *v = NULL;
 	if (*pedido) {
-		v = criar_video(pedido, bitrate);
+		v = criar_video(pedido, bitrate, video);
 		usado = pedido;
 	} else {
 		for (size_t i = 0; !v && i < sizeof(s_auto_encoders) / sizeof(s_auto_encoders[0]); i++) {
-			v = criar_video(s_auto_encoders[i], bitrate);
+			v = criar_video(s_auto_encoders[i], bitrate, video);
 			usado = s_auto_encoders[i];
 		}
 	}
@@ -521,32 +535,37 @@ static bool obter_proprios(struct saida *s, obs_encoder_t **venc, obs_encoder_t 
 	}
 
 	pthread_mutex_lock(&s_lock);
-	s_venc = v;
-	s_aenc = a;
-	snprintf(s_enc_em_uso, sizeof(s_enc_em_uso), "%s", usado);
+	par->venc = v;
+	par->aenc = a;
+	snprintf(par->em_uso, sizeof(par->em_uso), "%s", usado);
 	s->usa_proprio = true;
-	s_enc_refs++;
+	s->par_idx = vertical ? 1 : 0;
+	par->refs++;
 	pthread_mutex_unlock(&s_lock);
-	obs_log(LOG_INFO, "own encoders created: video=%s bitrate=%d kbps, audio 160 kbps", usado, bitrate);
+	obs_log(LOG_INFO, "own encoders created (%s): video=%s bitrate=%d kbps, audio 160 kbps",
+		vertical ? "vertical" : "horizontal", usado, bitrate);
 	*venc = v;
 	*aenc = a;
 	return true;
 }
 
-/* Drops the slot's reference on the own encoders; the last one releases them. Caller holds op_lock, not lock. */
+/* Drops the slot's reference on its own encoders; the last one releases them. Caller holds op_lock, not lock. */
 static void soltar_proprios(struct saida *s)
 {
 	obs_encoder_t *v = NULL, *a = NULL;
+	bool vertical = false;
 
 	pthread_mutex_lock(&s_lock);
 	if (s->usa_proprio) {
+		struct par_enc *par = &s_par[s->par_idx ? 1 : 0];
+		vertical = s->par_idx != 0;
 		s->usa_proprio = false;
-		if (--s_enc_refs <= 0) {
-			s_enc_refs = 0;
-			v = s_venc;
-			a = s_aenc;
-			s_venc = s_aenc = NULL;
-			s_enc_em_uso[0] = 0;
+		if (--par->refs <= 0) {
+			par->refs = 0;
+			v = par->venc;
+			a = par->aenc;
+			par->venc = par->aenc = NULL;
+			par->em_uso[0] = 0;
 		}
 	}
 	pthread_mutex_unlock(&s_lock);
@@ -556,7 +575,7 @@ static void soltar_proprios(struct saida *s)
 	if (a)
 		obs_encoder_release(a);
 	if (v)
-		obs_log(LOG_INFO, "own encoders released");
+		obs_log(LOG_INFO, "own encoders released (%s)", vertical ? "vertical" : "horizontal");
 }
 
 /* Detaches the output from the slot, stops and releases it, then sets the final state. */
@@ -590,10 +609,9 @@ static void derrubar(int i, enum estado estado, enum erro erro)
 	mudar_estado(s, NULL, estado, erro, false);
 }
 
-/* The vertical canvas does not exist yet (phase 2 flips this). */
 static bool canvas_vertical_disponivel(void)
 {
-	return false;
+	return vertical_disponivel();
 }
 
 /* Starts slot i. manual=true ignores "ativo" and works with the main output off (then it uses the own encoders).
@@ -610,7 +628,8 @@ static const char *iniciar_slot(int i, bool manual)
 		return manual ? "id_desconhecido" : NULL;
 	}
 	bool principal_on = s_principal_on;
-	if (s->vertical && !canvas_vertical_disponivel()) {
+	bool vertical = s->vertical;
+	if (vertical && !canvas_vertical_disponivel()) {
 		bool novo = s->estado != E_ERRO || s->erro != ERR_VERTICAL;
 		char vid[MAX_ID + 1];
 		snprintf(vid, sizeof(vid), "%s", s->id);
@@ -640,7 +659,7 @@ static const char *iniciar_slot(int i, bool manual)
 
 	obs_encoder_t *venc = NULL;
 	obs_encoder_t *aenc = NULL;
-	if (principal_on) {
+	if (principal_on && !vertical) {
 		obs_output_t *principal = obs_frontend_get_streaming_output();
 		venc = principal ? obs_output_get_video_encoder(principal) : NULL;
 		aenc = principal ? obs_output_get_audio_encoder(principal, 0) : NULL;
@@ -650,21 +669,23 @@ static const char *iniciar_slot(int i, bool manual)
 
 	pthread_mutex_lock(&s_lock);
 	bool modo_proprio = s_modo_proprio;
-	if (principal_on && !venc)
+	if (principal_on && !vertical && !venc)
 		s_multitrack = true; /* s_multitrack always reflects the main output */
 	pthread_mutex_unlock(&s_lock);
 
-	if (!venc || modo_proprio) {
-		/* Main output off (manual start), multitrack main (e.g. Twitch Enhanced Broadcasting) or "proprio" mode:
-		 * use the plugin's own encoder pair. */
-		if (!obter_proprios(s, &venc, &aenc)) {
+	if (vertical || !venc || modo_proprio) {
+		/* Vertical output (always: the main encoder works on the main canvas), main output off (manual start),
+		 * multitrack main (e.g. Twitch Enhanced Broadcasting) or "proprio" mode: use the plugin's own encoder
+		 * pair (vertical pair for vertical outputs). */
+		if (!obter_proprios(s, vertical, &venc, &aenc)) {
 			mudar_estado(s, NULL, E_ERRO, ERR_SEM_ENCODER, false);
 			return "sem_encoder";
 		}
 		obs_log(LOG_INFO, "saida '%s': using own encoders (%s)", id,
-			!principal_on  ? "main output is off"
-			: modo_proprio ? "proprio mode"
-				       : "main output is multitrack");
+			vertical        ? "vertical canvas"
+			: !principal_on ? "main output is off"
+			: modo_proprio  ? "proprio mode"
+					: "main output is multitrack");
 	} else if (!aenc) {
 		obs_log(LOG_WARNING, "saida '%s': main output has no audio encoder", id);
 		mudar_estado(s, NULL, E_ERRO, ERR_SEM_ENCODER, false);
@@ -747,24 +768,58 @@ void saidas_parar_tudo(void)
 			parar_slot(i);
 	}
 	/* Defensive: nothing should still hold the own encoders at this point. */
+	obs_encoder_t *v[2], *a[2];
 	pthread_mutex_lock(&s_lock);
-	obs_encoder_t *v = s_venc, *a = s_aenc;
-	s_venc = s_aenc = NULL;
-	s_enc_refs = 0;
-	s_enc_em_uso[0] = 0;
+	for (int k = 0; k < 2; k++) {
+		v[k] = s_par[k].venc;
+		a[k] = s_par[k].aenc;
+		s_par[k].venc = s_par[k].aenc = NULL;
+		s_par[k].refs = 0;
+		s_par[k].em_uso[0] = 0;
+	}
 	for (int i = 0; i < MAX_SAIDAS; i++)
 		s_saidas[i].usa_proprio = false;
 	pthread_mutex_unlock(&s_lock);
-	if (v)
-		obs_encoder_release(v);
-	if (a)
-		obs_encoder_release(a);
+	for (int k = 0; k < 2; k++) {
+		if (v[k])
+			obs_encoder_release(v[k]);
+		if (a[k])
+			obs_encoder_release(a[k]);
+	}
 	pthread_mutex_unlock(&s_op_lock);
 }
 
 void saidas_principal_parando(void)
 {
 	saidas_parar_tudo();
+}
+
+/* The vertical canvas is about to disappear: stop every vertical output (the vertical encoders go with them). */
+void saidas_parar_verticais(void)
+{
+	pthread_mutex_lock(&s_op_lock);
+	for (int i = 0; i < MAX_SAIDAS; i++) {
+		pthread_mutex_lock(&s_lock);
+		bool alvo = s_saidas[i].usada && s_saidas[i].vertical;
+		pthread_mutex_unlock(&s_lock);
+		if (alvo)
+			parar_slot(i);
+	}
+	pthread_mutex_unlock(&s_op_lock);
+}
+
+/* The vertical canvas now exists: start active vertical outputs if the main output is on. */
+void saidas_vertical_pronto(void)
+{
+	pthread_mutex_lock(&s_op_lock);
+	for (int i = 0; i < MAX_SAIDAS; i++) {
+		pthread_mutex_lock(&s_lock);
+		bool alvo = s_saidas[i].usada && s_saidas[i].vertical;
+		pthread_mutex_unlock(&s_lock);
+		if (alvo)
+			(void)iniciar_slot(i, false);
+	}
+	pthread_mutex_unlock(&s_op_lock);
 }
 
 /* ---------- requests ---------- */
@@ -965,7 +1020,7 @@ void saidas_req_status(obs_data_t *response_data)
 	bool multitrack = s_multitrack;
 	bool modo_proprio = s_modo_proprio;
 	char enc_uso[MAX_ENC_ID];
-	snprintf(enc_uso, sizeof(enc_uso), "%s", s_enc_em_uso);
+	snprintf(enc_uso, sizeof(enc_uso), "%s", s_par[0].em_uso);
 	pthread_mutex_unlock(&s_lock);
 	obs_data_set_string(response_data, "encoder_proprio", enc_uso);
 	obs_data_set_string(response_data, "modo_encoder", modo_proprio ? "proprio" : "auto");
@@ -1122,7 +1177,7 @@ void saidas_principal_info(struct principal_info *out)
 	out->quadros_perdidos = out->ao_vivo ? s_principal_perdidos : 0;
 	out->multitrack = s_multitrack;
 	out->bitrate_proprio = s_bitrate_proprio;
-	snprintf(out->encoder_proprio, sizeof(out->encoder_proprio), "%s", s_enc_em_uso);
+	snprintf(out->encoder_proprio, sizeof(out->encoder_proprio), "%s", s_par[0].em_uso);
 	pthread_mutex_unlock(&s_lock);
 }
 

@@ -37,6 +37,9 @@ void saidas_liberar(void);
 void saidas_principal_iniciou(void);
 void saidas_principal_parando(void);
 void saidas_parar_tudo(void);
+/* Vertical canvas lifecycle (called by vertical.c, never while holding its own lock). */
+void saidas_parar_verticais(void);
+void saidas_vertical_pronto(void);
 
 /* Vendor requests. Fill response_data with "ok" (+ "erro" on failure). */
 void saidas_req_definir(obs_data_t *request_data, obs_data_t *response_data);

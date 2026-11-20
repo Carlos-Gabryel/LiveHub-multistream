@@ -22,6 +22,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
 #include "saidas.h"
+#include "vertical.h"
 
 #include <QDesktopServices>
 #include <QElapsedTimer>
@@ -368,6 +369,9 @@ public:
 		v2->addLayout(linhasLayout);
 		vazio = criarMudo(conteudo, T("Nenhuma plataforma extra configurada."));
 		v2->addWidget(vazio);
+		canvasV = criarMudo(conteudo, QString(), "mut11");
+		canvasV->setVisible(false);
+		v2->addWidget(canvasV);
 
 		raiz->addStretch(1);
 
@@ -392,6 +396,7 @@ private:
 	LabelElidido *principalInfo = nullptr;
 	QVBoxLayout *linhasLayout = nullptr;
 	QLabel *vazio = nullptr;
+	QLabel *canvasV = nullptr;
 	QPushButton *cfgRodape = nullptr;
 	QTimer *timer = nullptr;
 	std::vector<Linha *> linhas;
@@ -506,6 +511,16 @@ private:
 				criarLinha(QString::fromUtf8(infos[i].id), infos[i].vertical);
 		}
 		vazio->setVisible(n == 0);
+
+		if (vertical_disponivel()) {
+			char ativa[256];
+			vertical_cena_ativa(ativa, sizeof(ativa));
+			canvasV->setText(T("Canvas vertical: %1")
+						 .arg(*ativa ? QString::fromUtf8(ativa) : QString::fromUtf8("—")));
+			canvasV->setVisible(true);
+		} else {
+			canvasV->setVisible(false);
+		}
 
 		for (size_t i = 0; i < n && i < linhas.size(); i++) {
 			const saida_info &si = infos[i];
