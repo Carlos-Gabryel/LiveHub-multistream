@@ -56,6 +56,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QLineEdit>
 #include <QMenu>
 #include <QMessageBox>
+#include <QGuiApplication>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QPainterPath>
@@ -400,6 +401,15 @@ public:
 		setMinimumSize(90, 160);
 		setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
 
+		hub().ouvir(this, [this] { recarregar(); });
+		auto *t = new QTimer(this);
+		t->setInterval(100);
+		QObject::connect(t, &QTimer::timeout, this, [this] {
+			if (isVisible() && modo_ == Modo::Nenhum)
+				recarregar();
+		});
+		t->start();
+
 		if (QWindow *j = windowHandle()) {
 			QObject::connect(j, &QWindow::visibleChanged, this, [this](bool v) {
 				if (!v) {
@@ -421,7 +431,11 @@ public:
 		}
 	}
 
-	~Visor() override { soltar(); }
+	~Visor() override
+	{
+		hub().parar(this);
+		soltar();
+	}
 
 	QPaintEngine *paintEngine() const override { return nullptr; }
 
@@ -457,6 +471,12 @@ public:
 
 	void destruirDisplay()
 	{
+		if (quad_) {
+			obs_enter_graphics();
+			gs_vertexbuffer_destroy(quad_);
+			obs_leave_graphics();
+			quad_ = nullptr;
+		}
 		if (display_) {
 			obs_display_remove_draw_callback(display_, &Visor::desenhar, this);
 			obs_display_destroy(display_);
@@ -548,10 +568,614 @@ protected:
 		definirAtivo(false);
 	}
 
+	void mousePressEvent(QMouseEvent *e) override
+	{
+		setFocus();
+		recarregar();
+		vec2 p = paraCanvas(e->position());
+		const vertical_item *sel = achar(hub().selecionado());
+
+		if (e->button() == Qt::RightButton) {
+			const vertical_item *alvo = itemEm(p);
+			if (!alvo)
+				alvo = sel;
+			if (alvo) {
+				const vertical_item copia = *alvo; /* the snapshot is rebuilt by the selection change */
+				hub().selecionar(copia.id);
+				menuContexto(copia, e->globalPosition().toPoint());
+			}
+			return;
+		}
+		if (e->button() != Qt::LeftButton)
+			return;
+
+		cenaEdicao_ = ativaStd();
+		moveu_ = false;
+		inicio_ = p;
+		if (sel && sel->video && !sel->bloqueado) {
+			uint32_t f = alcaEm(*sel, p);
+			if (f) {
+				base_ = *sel;
+				alca_ = f;
+				iniciarResize(base_);
+				modo_ = Modo::Redimensionar;
+				return;
+			}
+		}
+		const vertical_item *alvo = itemEm(p);
+		if (!alvo) {
+			hub().selecionar(0);
+			return;
+		}
+		const int64_t alvoId = alvo->id;
+		if (alvoId != hub().selecionado())
+			hub().selecionar(alvoId);
+		recarregar();
+		alvo = achar(alvoId);
+		if (alvo && !alvo->bloqueado) {
+			base_ = *alvo;
+			modo_ = Modo::Mover;
+		}
+	}
+
+	void mouseMoveEvent(QMouseEvent *e) override
+	{
+		vec2 p = paraCanvas(e->position());
+		if (modo_ == Modo::Nenhum) {
+			atualizarCursor(p);
+			return;
+		}
+		if (!(e->buttons() & Qt::LeftButton))
+			return;
+		p.x = std::round(p.x);
+		p.y = std::round(p.y);
+		moveu_ = true;
+		if (modo_ == Modo::Mover)
+			moverItem(p);
+		else
+			redimensionarItem(p);
+	}
+
+	void mouseReleaseEvent(QMouseEvent *e) override
+	{
+		if (e->button() != Qt::LeftButton || modo_ == Modo::Nenhum)
+			return;
+		Modo m = modo_;
+		modo_ = Modo::Nenhum;
+		if (moveu_ && m != Modo::Nenhum)
+			vertical_alteracao_concluida();
+		moveu_ = false;
+		recarregar();
+	}
+
+	void keyPressEvent(QKeyEvent *e) override
+	{
+		const vertical_item *sel = achar(hub().selecionado());
+		if (!sel || modo_ != Modo::Nenhum) {
+			QWidget::keyPressEvent(e);
+			return;
+		}
+		int step = (e->modifiers() & Qt::ShiftModifier) ? 10 : 1;
+		float dx = 0, dy = 0;
+		switch (e->key()) {
+		case Qt::Key_Left:
+			dx = -float(step);
+			break;
+		case Qt::Key_Right:
+			dx = float(step);
+			break;
+		case Qt::Key_Up:
+			dy = -float(step);
+			break;
+		case Qt::Key_Down:
+			dy = float(step);
+			break;
+		case Qt::Key_Delete: {
+			vertical_item copia = *sel;
+			removerItem(copia);
+			return;
+		}
+		default:
+			QWidget::keyPressEvent(e);
+			return;
+		}
+		if (sel->bloqueado)
+			return;
+		cenaEdicao_ = ativaStd();
+		base_ = *sel;
+		obs_transform_info ti = sel->ti;
+		ti.pos.x += dx;
+		ti.pos.y += dy;
+		aplicar(ti, sel->crop);
+		vertical_alteracao_concluida();
+	}
+
 private:
+	enum class Modo { Nenhum, Mover, Redimensionar };
+	/* handle flags, same bits as OBS (ITEM_LEFT...) */
+	static constexpr uint32_t H_ESQ = 1, H_DIR = 2, H_TOPO = 4, H_BASE = 8;
+
+	/* Selection overlay copied for the graphics thread. */
+	std::mutex ovMtx_;
+	bool ovTem_ = false;
+	matrix4 ovCaixa_ = {};
+	gs_vertbuffer_t *quad_ = nullptr; /* unit square, created/destroyed with the display */
+
+	std::vector<vertical_item> itens_; /* snapshot, bottom first */
+	std::string cenaEdicao_;
+	Modo modo_ = Modo::Nenhum;
+	bool moveu_ = false;
+	vertical_item base_ = {};
+	vec2 inicio_ = {};
+	uint32_t alca_ = 0;
+	matrix4 itemParaTela_ = {}, telaParaItem_ = {};
+	vec2 tamItem_ = {};
+
 	obs_display_t *display_ = nullptr;
 	obs_canvas_t *canvas_ = nullptr; /* referenced; only changed while display_ does not exist */
 	bool destruindo_ = false;
+
+	/* ---- selection overlay (graphics thread) ---- */
+
+	void desenharSelecao(float escalaPx)
+	{
+		matrix4 caixa;
+		{
+			std::lock_guard<std::mutex> g(ovMtx_);
+			if (!ovTem_)
+				return;
+			caixa = ovCaixa_;
+		}
+		if (!quad_) {
+			gs_render_start(true);
+			gs_vertex2f(0.0f, 0.0f);
+			gs_vertex2f(1.0f, 0.0f);
+			gs_vertex2f(0.0f, 1.0f);
+			gs_vertex2f(1.0f, 1.0f);
+			quad_ = gs_render_save();
+		}
+		if (!quad_)
+			return;
+		gs_effect_t *solido = obs_get_base_effect(OBS_EFFECT_SOLID);
+		gs_eparam_t *cor = gs_effect_get_param_by_name(solido, "color");
+		const float dpr = float(devicePixelRatioF());
+		const float esp = 2.0f * dpr / escalaPx; /* 2 logical px of line, in canvas units */
+		const float lado = 9.0f * dpr / escalaPx;
+
+		vec3 c[4] = {pt(0, 0, caixa), pt(1, 0, caixa), pt(1, 1, caixa), pt(0, 1, caixa)};
+		vec4 acento, branco;
+		vec4_set(&acento, 0x91 / 255.0f, 0x46 / 255.0f, 1.0f, 1.0f);
+		vec4_set(&branco, 1.0f, 1.0f, 1.0f, 1.0f);
+
+		while (gs_effect_loop(solido, "Solid")) {
+			gs_effect_set_vec4(cor, &acento);
+			gs_load_vertexbuffer(quad_);
+			for (int i = 0; i < 4; i++) {
+				const vec3 &a = c[i], &b = c[(i + 1) % 4];
+				float dx = b.x - a.x, dy = b.y - a.y;
+				float len = std::sqrt(dx * dx + dy * dy);
+				gs_matrix_push();
+				gs_matrix_identity();
+				gs_matrix_translate3f(a.x, a.y, 0.0f);
+				gs_matrix_rotaa4f(0.0f, 0.0f, 1.0f, std::atan2(dy, dx));
+				gs_matrix_translate3f(0.0f, -esp / 2, 0.0f);
+				gs_matrix_scale3f(len, esp, 1.0f);
+				gs_draw(GS_TRISTRIP, 0, 0);
+				gs_matrix_pop();
+			}
+			static const float pos[8][2] = {{0, 0},    {0.5f, 0}, {1, 0},    {0, 0.5f},
+							{1, 0.5f}, {0, 1},    {0.5f, 1}, {1, 1}};
+			for (int pass = 0; pass < 2; pass++) {
+				gs_effect_set_vec4(cor, pass == 0 ? &branco : &acento);
+				float l = pass == 0 ? lado + esp : lado;
+				for (auto &q : pos) {
+					vec3 h = pt(q[0], q[1], caixa);
+					gs_matrix_push();
+					gs_matrix_identity();
+					gs_matrix_translate3f(h.x - l / 2, h.y - l / 2, 0.0f);
+					gs_matrix_scale3f(l, l, 1.0f);
+					gs_draw(GS_TRISTRIP, 0, 0);
+					gs_matrix_pop();
+				}
+			}
+		}
+	}
+
+	static vec3 pt(float x, float y, const matrix4 &m)
+	{
+		vec3 r;
+		vec3_set(&r, x, y, 0.0f);
+		vec3_transform(&r, &r, &m);
+		return r;
+	}
+
+	/* ---- snapshot / selection ---- */
+
+	const vertical_item *achar(int64_t id) const
+	{
+		for (const auto &it : itens_)
+			if (it.id == id)
+				return &it;
+		return nullptr;
+	}
+
+	void recarregar()
+	{
+		std::string cena = ativaStd();
+		itens_.resize(MAX_ITENS_UI);
+		size_t n = cena.empty() ? 0 : vertical_itens(cena.c_str(), itens_.data(), MAX_ITENS_UI);
+		itens_.resize(n);
+		if (modo_ == Modo::Nenhum)
+			cenaEdicao_ = cena;
+		const vertical_item *sel = achar(hub().selecionado());
+		std::lock_guard<std::mutex> g(ovMtx_);
+		ovTem_ = sel != nullptr && sel->video;
+		if (ovTem_)
+			ovCaixa_ = sel->caixa;
+	}
+
+	/* Top-most visible item with video under `p` (canvas coords). */
+	const vertical_item *itemEm(const vec2 &p) const
+	{
+		for (size_t i = itens_.size(); i-- > 0;) {
+			const vertical_item &it = itens_[i];
+			if (!it.visivel || !it.video)
+				continue;
+			matrix4 inv;
+			matrix4_inv(&inv, &it.caixa);
+			vec3 r = pt(p.x, p.y, inv);
+			if (r.x >= 0.0f && r.x <= 1.0f && r.y >= 0.0f && r.y <= 1.0f)
+				return &it;
+		}
+		return nullptr;
+	}
+
+	/* Handle of the selected item under `p` (OBS HandleFindData), 0 when none. */
+	uint32_t alcaEm(const vertical_item &it, const vec2 &p) const
+	{
+		float raio = 9.0f / escalaLogica();
+		struct H {
+			float x, y;
+			uint32_t f;
+		};
+		const H hs[8] = {{0, 0, H_TOPO | H_ESQ}, {0.5f, 0, H_TOPO},     {1, 0, H_TOPO | H_DIR},
+				 {0, 0.5f, H_ESQ},       {1, 0.5f, H_DIR},      {0, 1, H_BASE | H_ESQ},
+				 {0.5f, 1, H_BASE},      {1, 1, H_BASE | H_DIR}};
+		float melhor = raio;
+		uint32_t f = 0;
+		for (const H &h : hs) {
+			vec3 q = pt(h.x, h.y, it.caixa);
+			float dx = q.x - p.x, dy = q.y - p.y;
+			float d = std::sqrt(dx * dx + dy * dy);
+			if (d < melhor) {
+				melhor = d;
+				f = h.f;
+			}
+		}
+		return f;
+	}
+
+	/* ---- snapping (OBSBasicPreview::GetSnapOffset, default settings: edges + center, 10px) ---- */
+
+	vec3 deslocamentoImantado(const vec3 &tl, const vec3 &br) const
+	{
+		const float W = float(VERTICAL_LARGURA), H = float(VERTICAL_ALTURA);
+		const float dist = 10.0f / escalaLogica();
+		const float EPS = 0.01f;
+		vec3 off;
+		vec3_zero(&off);
+		float cx = br.x - (br.x - tl.x) / 2.0f, cy = br.y - (br.y - tl.y) / 2.0f;
+		if (std::fabs(tl.x) < dist)
+			off.x = -tl.x;
+		if (std::fabs(off.x) < EPS && std::fabs(W - br.x) < dist)
+			off.x = W - br.x;
+		if (std::fabs(W - (br.x - tl.x)) > dist && std::fabs(W / 2.0f - cx) < dist)
+			off.x = W / 2.0f - cx;
+		if (std::fabs(tl.y) < dist)
+			off.y = -tl.y;
+		if (std::fabs(off.y) < EPS && std::fabs(H - br.y) < dist)
+			off.y = H - br.y;
+		if (std::fabs(H - (br.y - tl.y)) > dist && std::fabs(H / 2.0f - cy) < dist)
+			off.y = H / 2.0f - cy;
+		return off;
+	}
+
+	static bool altPressionado() { return QGuiApplication::keyboardModifiers() & Qt::AltModifier; }
+
+	void limitesTela(const matrix4 &m, vec3 &tl, vec3 &br) const
+	{
+		vec3 q[4] = {pt(0, 0, m), pt(1, 0, m), pt(0, 1, m), pt(1, 1, m)};
+		tl = br = q[0];
+		for (int i = 1; i < 4; i++) {
+			vec3_min(&tl, &tl, &q[i]);
+			vec3_max(&br, &br, &q[i]);
+		}
+	}
+
+	/* ---- transform application ---- */
+
+	void aplicar(const obs_transform_info &ti, const obs_sceneitem_crop &cr)
+	{
+		vertical_item_transformar(cenaEdicao_.c_str(), base_.id, &ti, &cr);
+		recarregar();
+	}
+
+	static vec2 tamanhoDoItem(const vertical_item &it)
+	{
+		vec2 size;
+		if (it.ti.bounds_type != OBS_BOUNDS_NONE) {
+			size = it.ti.bounds;
+		} else {
+			size.x = std::fmax(float((int)it.largura - it.crop.left - it.crop.right), 0.0f);
+			size.y = std::fmax(float((int)it.altura - it.crop.top - it.crop.bottom), 0.0f);
+			vec2_mul(&size, &size, &it.ti.scale);
+		}
+		return size;
+	}
+
+	void iniciarResize(const vertical_item &it)
+	{
+		tamItem_ = tamanhoDoItem(it);
+		vec3 ul;
+		vec3_from_vec4(&ul, &it.caixa.t);
+		float rot = it.ti.rot * 3.14159265f / 180.0f;
+		matrix4_identity(&itemParaTela_);
+		matrix4_rotate_aa4f(&itemParaTela_, &itemParaTela_, 0.0f, 0.0f, 1.0f, rot);
+		matrix4_translate3f(&itemParaTela_, &itemParaTela_, ul.x, ul.y, 0.0f);
+		matrix4_identity(&telaParaItem_);
+		matrix4_translate3f(&telaParaItem_, &telaParaItem_, -ul.x, -ul.y, 0.0f);
+		matrix4_rotate_aa4f(&telaParaItem_, &telaParaItem_, 0.0f, 0.0f, 1.0f, -rot);
+	}
+
+	/* OBSBasicPreview::ClampAspect */
+	void travarAspecto(vec3 &tl, vec3 &br, vec2 &size, const vec2 &baseSize) const
+	{
+		float baseAsp = baseSize.x / baseSize.y;
+		float asp = size.x / size.y;
+		bool mesmo = (size.y >= 0.0f && size.x >= 0.0f) || (size.y <= 0.0f && size.x <= 0.0f);
+		if (alca_ == (H_TOPO | H_ESQ) || alca_ == (H_TOPO | H_DIR) || alca_ == (H_BASE | H_ESQ) ||
+		    alca_ == (H_BASE | H_DIR)) {
+			if (asp < baseAsp)
+				size.x = mesmo ? size.y * baseAsp : size.y * baseAsp * -1.0f;
+			else
+				size.y = mesmo ? size.x / baseAsp : size.x / baseAsp * -1.0f;
+		} else if (alca_ == H_TOPO || alca_ == H_BASE) {
+			size.x = mesmo ? size.y * baseAsp : size.y * baseAsp * -1.0f;
+		} else if (alca_ == H_ESQ || alca_ == H_DIR) {
+			size.y = mesmo ? size.x / baseAsp : size.x / baseAsp * -1.0f;
+		}
+		size.x = std::round(size.x);
+		size.y = std::round(size.y);
+		if (alca_ & H_ESQ)
+			tl.x = br.x - size.x;
+		else if (alca_ & H_DIR)
+			br.x = tl.x + size.x;
+		if (alca_ & H_TOPO)
+			tl.y = br.y - size.y;
+		else if (alca_ & H_BASE)
+			br.y = tl.y + size.y;
+	}
+
+	/* OBSBasicPreview::SnapStretchingToScreen */
+	void imantarResize(vec3 &tl, vec3 &br) const
+	{
+		vec3 nTL = pt(tl.x, tl.y, itemParaTela_), nTR = pt(br.x, tl.y, itemParaTela_);
+		vec3 nBL = pt(tl.x, br.y, itemParaTela_), nBR = pt(br.x, br.y, itemParaTela_);
+		vec3 bTL = nTL, bBR = nTL;
+		vec3_min(&bTL, &bTL, &nTR);
+		vec3_min(&bTL, &bTL, &nBL);
+		vec3_min(&bTL, &bTL, &nBR);
+		vec3_max(&bBR, &bBR, &nTR);
+		vec3_max(&bBR, &bBR, &nBL);
+		vec3_max(&bBR, &bBR, &nBR);
+		vec3 off = deslocamentoImantado(bTL, bBR);
+		vec3_add(&off, &off, &nTL);
+		vec3_transform(&off, &off, &telaParaItem_);
+		vec3_sub(&off, &off, &tl);
+		if (alca_ & H_ESQ)
+			tl.x += off.x;
+		else if (alca_ & H_DIR)
+			br.x += off.x;
+		if (alca_ & H_TOPO)
+			tl.y += off.y;
+		else if (alca_ & H_BASE)
+			br.y += off.y;
+	}
+
+	/* OBSBasicPreview::StretchItem, working on the snapshot taken at press time. */
+	void redimensionarItem(const vec2 &p)
+	{
+		const bool shift = QGuiApplication::keyboardModifiers() & Qt::ShiftModifier;
+		vec3 tl, br, p3;
+		vec3_zero(&tl);
+		vec3_set(&br, tamItem_.x, tamItem_.y, 0.0f);
+		vec3_set(&p3, p.x, p.y, 0.0f);
+		vec3_transform(&p3, &p3, &telaParaItem_);
+		if (alca_ & H_ESQ)
+			tl.x = p3.x;
+		else if (alca_ & H_DIR)
+			br.x = p3.x;
+		if (alca_ & H_TOPO)
+			tl.y = p3.y;
+		else if (alca_ & H_BASE)
+			br.y = p3.y;
+		if (!altPressionado())
+			imantarResize(tl, br);
+
+		if (!base_.largura || !base_.altura)
+			return; /* source size 0 while resizing: keep the transform (OBS does the same) */
+		vec2 baseSize;
+		vec2_set(&baseSize, float(base_.largura), float(base_.altura));
+		vec2 size;
+		vec2_set(&size, br.x - tl.x, br.y - tl.y);
+
+		obs_transform_info ti = base_.ti;
+		if (ti.bounds_type != OBS_BOUNDS_NONE) {
+			if (shift)
+				travarAspecto(tl, br, size, baseSize);
+			if (tl.x > br.x)
+				std::swap(tl.x, br.x);
+			if (tl.y > br.y)
+				std::swap(tl.y, br.y);
+			vec2_abs(&size, &size);
+			ti.bounds = size;
+		} else {
+			baseSize.x -= float(base_.crop.left + base_.crop.right);
+			baseSize.y -= float(base_.crop.top + base_.crop.bottom);
+			if (baseSize.x <= 0.0f || baseSize.y <= 0.0f)
+				return;
+			if (!shift)
+				travarAspecto(tl, br, size, baseSize);
+			vec2_div(&size, &size, &baseSize);
+			ti.scale = size;
+		}
+		/* new anchor position (OBS CalculateStretchPos) */
+		vec3 pos;
+		vec3_zero(&pos);
+		uint32_t al = ti.alignment;
+		pos.x = (al & OBS_ALIGN_LEFT) ? tl.x : (al & OBS_ALIGN_RIGHT) ? br.x : (br.x - tl.x) * 0.5f + tl.x;
+		pos.y = (al & OBS_ALIGN_TOP) ? tl.y : (al & OBS_ALIGN_BOTTOM) ? br.y : (br.y - tl.y) * 0.5f + tl.y;
+		vec3_transform(&pos, &pos, &itemParaTela_);
+		ti.pos.x = std::round(pos.x);
+		ti.pos.y = std::round(pos.y);
+		aplicar(ti, base_.crop);
+	}
+
+	/* OBSBasicPreview::MoveItems + SnapItemMovement */
+	void moverItem(const vec2 &p)
+	{
+		vec2 off;
+		off.x = std::round(p.x - inicio_.x);
+		off.y = std::round(p.y - inicio_.y);
+		if (!altPressionado()) {
+			vec3 tl, br;
+			limitesTela(base_.caixa, tl, br);
+			tl.x += off.x;
+			tl.y += off.y;
+			br.x += off.x;
+			br.y += off.y;
+			vec3 s = deslocamentoImantado(tl, br);
+			off.x += s.x;
+			off.y += s.y;
+		}
+		obs_transform_info ti = base_.ti;
+		ti.pos.x = std::round(base_.ti.pos.x + off.x);
+		ti.pos.y = std::round(base_.ti.pos.y + off.y);
+		aplicar(ti, base_.crop);
+	}
+
+	/* ---- context menu actions ---- */
+
+	void aplicarPreset(const vertical_item &it,
+			   const std::function<void(obs_transform_info &, obs_sceneitem_crop &)> &f)
+	{
+		base_ = it;
+		cenaEdicao_ = ativaStd();
+		obs_transform_info ti = it.ti;
+		obs_sceneitem_crop cr = it.crop;
+		f(ti, cr);
+		aplicar(ti, cr);
+		vertical_alteracao_concluida();
+	}
+
+	void menuContexto(const vertical_item &it, const QPoint &global)
+	{
+		const float W = float(VERTICAL_LARGURA), H = float(VERTICAL_ALTURA);
+		QMenu menu(this);
+		auto limites = [this](const vertical_item &i, vec3 &tl, vec3 &br) {
+			limitesTela(i.caixa, tl, br);
+		};
+		auto ajustar = [this, W, H](const vertical_item &i, obs_bounds_type tipo, bool cortar) {
+			aplicarPreset(i, [&](obs_transform_info &ti, obs_sceneitem_crop &) {
+				ti.pos.x = 0.0f;
+				ti.pos.y = 0.0f;
+				ti.rot = 0.0f;
+				ti.scale.x = ti.scale.y = 1.0f;
+				ti.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
+				ti.bounds_type = tipo;
+				ti.bounds_alignment = OBS_ALIGN_CENTER;
+				ti.bounds.x = W;
+				ti.bounds.y = H;
+				ti.crop_to_bounds = cortar;
+			});
+		};
+		auto centrar = [this, limites, W, H](const vertical_item &i, bool horizontal, bool vertical) {
+			aplicarPreset(i, [&](obs_transform_info &ti, obs_sceneitem_crop &) {
+				vec3 tl, br;
+				limites(i, tl, br);
+				if (horizontal)
+					ti.pos.x = std::round(ti.pos.x + (W / 2.0f - (tl.x + br.x) / 2.0f));
+				if (vertical)
+					ti.pos.y = std::round(ti.pos.y + (H / 2.0f - (tl.y + br.y) / 2.0f));
+			});
+		};
+		const vertical_item copia = it;
+		QAction *a;
+		a = menu.addAction(T("Preencher a tela (cortar)"));
+		QObject::connect(a, &QAction::triggered, this, [=] { ajustar(copia, OBS_BOUNDS_SCALE_OUTER, true); });
+		a = menu.addAction(T("Ajustar à tela"));
+		QObject::connect(a, &QAction::triggered, this, [=] { ajustar(copia, OBS_BOUNDS_SCALE_INNER, false); });
+		a = menu.addAction(T("Esticar"));
+		QObject::connect(a, &QAction::triggered, this, [=] { ajustar(copia, OBS_BOUNDS_STRETCH, false); });
+		menu.addSeparator();
+		a = menu.addAction(T("Centralizar"));
+		QObject::connect(a, &QAction::triggered, this, [=] { centrar(copia, true, true); });
+		a = menu.addAction(T("Centralizar na horizontal"));
+		QObject::connect(a, &QAction::triggered, this, [=] { centrar(copia, true, false); });
+		a = menu.addAction(T("Resetar transformação"));
+		QObject::connect(a, &QAction::triggered, this, [=] {
+			aplicarPreset(copia, [](obs_transform_info &ti, obs_sceneitem_crop &cr) {
+				ti.pos.x = ti.pos.y = 0.0f;
+				ti.rot = 0.0f;
+				ti.scale.x = ti.scale.y = 1.0f;
+				ti.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
+				ti.bounds_type = OBS_BOUNDS_NONE;
+				ti.bounds.x = ti.bounds.y = 0.0f;
+				ti.bounds_alignment = OBS_ALIGN_CENTER;
+				ti.crop_to_bounds = false;
+				cr = {};
+			});
+		});
+		menu.addSeparator();
+		a = menu.addAction(T("Remover"));
+		QObject::connect(a, &QAction::triggered, this, [this, copia] { removerItem(copia); });
+		menu.exec(global);
+	}
+
+	void removerItem(const vertical_item &it)
+	{
+		std::string cena = ativaStd();
+		if (!confirmar(this, T("Remover fonte"), T("Remover \"%1\" desta cena vertical?").arg(nomeUi(it.nome)),
+			       T("Remover")))
+			return;
+		vertical_item_remover(cena.c_str(), it.id);
+		hub().selecionar(0);
+		recarregar();
+	}
+
+	void atualizarCursor(const vec2 &p)
+	{
+		Qt::CursorShape forma = Qt::ArrowCursor;
+		const vertical_item *sel = achar(hub().selecionado());
+		if (sel && sel->video && !sel->bloqueado) {
+			uint32_t f = alcaEm(*sel, p);
+			if (f == (H_TOPO | H_ESQ) || f == (H_BASE | H_DIR))
+				forma = Qt::SizeFDiagCursor;
+			else if (f == (H_TOPO | H_DIR) || f == (H_BASE | H_ESQ))
+				forma = Qt::SizeBDiagCursor;
+			else if (f == H_TOPO || f == H_BASE)
+				forma = Qt::SizeVerCursor;
+			else if (f == H_ESQ || f == H_DIR)
+				forma = Qt::SizeHorCursor;
+		}
+		if (forma == Qt::ArrowCursor) {
+			const vertical_item *sob = itemEm(p);
+			if (sob && sob->id == hub().selecionado() && !sob->bloqueado)
+				forma = Qt::SizeAllCursor;
+		}
+		if (cursor().shape() != forma)
+			setCursor(forma);
+	}
 
 	void redimensionar()
 	{
@@ -580,6 +1204,7 @@ private:
 		gs_ortho(0.0f, float(VERTICAL_LARGURA), 0.0f, float(VERTICAL_ALTURA), -100.0f, 100.0f);
 		gs_set_viewport(x, y, nw, nh);
 		obs_render_canvas_texture_src_color_only(c);
+		w->desenharSelecao(escala / 1.0f);
 		gs_projection_pop();
 		gs_viewport_pop();
 	}
