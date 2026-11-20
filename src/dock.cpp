@@ -27,9 +27,12 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QElapsedTimer>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QIcon>
 #include <QLabel>
+#include <QPixmap>
 #include <QPushButton>
 #include <QScrollArea>
+#include <QSize>
 #include <QStringList>
 #include <QStyle>
 #include <QTimer>
@@ -59,21 +62,22 @@ const char *ESTILO = R"(
 #lhmsRoot QScrollArea, #lhmsRoot QWidget#lhmsConteudo { background:transparent; border:none; }
 #lhmsRoot QLabel { background:transparent; color:#ececf1; font-size:13px; }
 #lhmsRoot QFrame#bloco { background:#17171f; border:1px solid #2a2a36; border-radius:10px; }
-#lhmsRoot QLabel#h3 { color:#a6a6b8; font-size:12px; font-weight:600; letter-spacing:0.4px; }
+#lhmsRoot QLabel#h3 { color:#a6a6b8; font-size:11px; font-weight:600; letter-spacing:0.4px; }
 #lhmsRoot QLabel#mut { color:#a6a6b8; font-size:12px; }
-#lhmsRoot QLabel#nome { font-size:14px; font-weight:700; }
-#lhmsRoot QLabel#pill { background:#262631; color:#b9b9c8; border-radius:6px; padding:1px 6px; font-size:11px; }
-#lhmsRoot QLabel#total { font-size:26px; font-weight:800; }
-#lhmsRoot QPushButton { min-height:30px; padding:0 14px; border-radius:8px; border:1px solid #3a3a48;
-  background:#23232e; color:#ececf1; font-weight:600; }
+#lhmsRoot QLabel#mut11 { color:#a6a6b8; font-size:11px; }
+#lhmsRoot QLabel#nome { font-size:12px; font-weight:700; }
+#lhmsRoot QLabel#pill { background:#262631; color:#b9b9c8; border-radius:5px; padding:0 5px; font-size:10px; }
+#lhmsRoot QLabel#total { font-size:15px; font-weight:700; }
+#lhmsRoot QLabel#aovivo { color:#ff6369; font-size:12px; font-weight:700; }
+#lhmsRoot QPushButton { min-height:22px; max-height:24px; padding:0 10px; border-radius:6px; border:1px solid #3a3a48;
+  background:#23232e; color:#ececf1; font-size:12px; font-weight:600; }
 #lhmsRoot QPushButton:hover { background:#2d2d3a; }
 #lhmsRoot QPushButton:disabled { background:#23232e; color:#77778a; }
 #lhmsRoot QPushButton[acao="iniciar"] { background:#9146ff; border-color:#9146ff; color:#ffffff; }
 #lhmsRoot QPushButton[acao="iniciar"]:hover { background:#a35fff; border-color:#a35fff; }
 #lhmsRoot QPushButton[acao="parar"] { background:#6b2431; border-color:#6b2431; color:#ffffff; }
-#lhmsRoot QPushButton[acao="parar"]:hover { background:#7d2a39; }
+#lhmsRoot QPushButton[acao="parar"]:hover { background:#822c3b; border-color:#822c3b; }
 #lhmsRoot QPushButton[acao]:disabled { background:#3b2a4f; border-color:#3b2a4f; color:#a9a0b8; }
-#lhmsRoot QPushButton#btnCfg { min-height:32px; }
 )";
 
 /* Portuguese strings are hardcoded (the plugin targets Brazilian streamers). */
@@ -95,18 +99,40 @@ QString num(long long v)
 	return v < 0 ? "-" + r : r;
 }
 
-QString corPlataforma(const QString &id)
-{
-	if (id == "twitch")
-		return "#9146ff";
-	if (id == "kick")
-		return "#53fc18";
-	if (id == "youtube")
-		return "#ff0033";
-	if (id == "tiktok")
-		return "#25f4ee";
-	return "#a6a6b8";
-}
+/* Label that elides its text when the dock is narrow. */
+class LabelElidido : public QLabel {
+public:
+	LabelElidido(QWidget *pai, const char *nome) : QLabel(pai)
+	{
+		setObjectName(nome);
+		setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+		setMinimumWidth(0);
+	}
+	void setCompleto(const QString &t)
+	{
+		if (t == completo_)
+			return;
+		completo_ = t;
+		refazer();
+	}
+
+protected:
+	void resizeEvent(QResizeEvent *e) override
+	{
+		QLabel::resizeEvent(e);
+		refazer();
+	}
+
+private:
+	QString completo_;
+	void refazer()
+	{
+		QString e = fontMetrics().elidedText(completo_, Qt::ElideRight, qMax(0, width()));
+		if (text() != e)
+			setText(e);
+		setToolTip(e != completo_ ? completo_ : QString());
+	}
+};
 
 /* Sets text/style only when it changed (avoids flicker and needless relayout). */
 void setTextoSe(QLabel *l, const QString &t)
@@ -121,11 +147,6 @@ void setEstiloSe(QWidget *w, const QString &s)
 		w->setStyleSheet(s);
 }
 
-void pintarPonto(QLabel *dot, const char *cor)
-{
-	setEstiloSe(dot, QString("background-color:%1;border-radius:4px;").arg(cor));
-}
-
 QLabel *criarLabel(QWidget *pai, const char *nome, const QString &texto = QString())
 {
 	QLabel *l = new QLabel(texto, pai);
@@ -133,20 +154,77 @@ QLabel *criarLabel(QWidget *pai, const char *nome, const QString &texto = QStrin
 	return l;
 }
 
-QLabel *criarPonto(QWidget *pai)
+QLabel *criarMudo(QWidget *pai, const QString &texto = QString(), const char *nome = "mut")
 {
-	QLabel *d = new QLabel(pai);
-	d->setFixedSize(8, 8);
-	pintarPonto(d, "#5a5a6c");
-	return d;
-}
-
-QLabel *criarMudo(QWidget *pai, const QString &texto = QString())
-{
-	QLabel *l = criarLabel(pai, "mut", texto);
+	QLabel *l = criarLabel(pai, nome, texto);
 	l->setWordWrap(true);
 	l->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 	return l;
+}
+
+QString nomePlataforma(const QString &id)
+{
+	if (id == "twitch")
+		return "Twitch";
+	if (id == "youtube")
+		return "YouTube";
+	if (id == "kick")
+		return "Kick";
+	if (id == "tiktok")
+		return "TikTok";
+	return QString();
+}
+
+/* Shows the platform icon (data/icons/<id>.svg) in the label; falls back to the bold name text. */
+void aplicarIcone(QLabel *l, const QString &id, const QString &nome)
+{
+	QString chave = id + "|" + nome;
+	if (l->property("chave").toString() == chave)
+		return;
+	l->setProperty("chave", chave);
+	l->setToolTip(nome);
+	l->setAccessibleName(nome);
+	QPixmap pm;
+	if (!id.isEmpty()) {
+		char *caminho = obs_module_file(("icons/" + id.toStdString() + ".svg").c_str());
+		if (caminho) {
+			qreal dpr = l->devicePixelRatioF();
+			pm = QIcon(QString::fromUtf8(caminho)).pixmap(QSize(18, 18) * dpr);
+			pm.setDevicePixelRatio(dpr);
+			bfree(caminho);
+		}
+	}
+	if (!pm.isNull()) {
+		l->setText(QString());
+		l->setPixmap(pm);
+		l->setFixedSize(18, 18);
+	} else {
+		l->setPixmap(QPixmap());
+		l->setText(nome);
+		l->setMinimumSize(0, 0);
+		l->setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+	}
+}
+
+/* Thin row frame with a status bar on both the left and right edges. */
+QFrame *criarMoldura(QWidget *pai, QHBoxLayout **h)
+{
+	QFrame *f = new QFrame(pai);
+	f->setObjectName("linha");
+	*h = new QHBoxLayout(f);
+	(*h)->setContentsMargins(8, 3, 8, 3);
+	(*h)->setSpacing(6);
+	return f;
+}
+
+void pintarBarra(QFrame *f, QString *atual, const char *cor)
+{
+	if (*atual == cor)
+		return;
+	*atual = cor;
+	f->setStyleSheet(QString("QFrame#linha{background:#1d1d27;border:none;border-left:3px solid %1;"
+				 "border-right:3px solid %1;border-radius:6px;}")
+				 .arg(cor));
 }
 
 QFrame *criarBloco(QWidget *pai, const QString &titulo, QVBoxLayout **layout)
@@ -154,8 +232,8 @@ QFrame *criarBloco(QWidget *pai, const QString &titulo, QVBoxLayout **layout)
 	QFrame *b = new QFrame(pai);
 	b->setObjectName("bloco");
 	auto *v = new QVBoxLayout(b);
-	v->setContentsMargins(12, 10, 12, 10);
-	v->setSpacing(6);
+	v->setContentsMargins(10, 8, 10, 8);
+	v->setSpacing(4);
 	QLabel *h = criarLabel(b, "h3", titulo.toUpper());
 	v->addWidget(h);
 	v->addSpacing(2);
@@ -198,15 +276,13 @@ const char *corTexto(const QString &estado)
 	return "#b9b9c8";
 }
 
-const char *corPonto(const QString &estado)
+const char *corBarra(const QString &estado)
 {
 	if (estado == "ao_vivo")
 		return "#3ddc84";
 	if (estado == "conectando" || estado == "reconectando")
 		return "#f0b45a";
-	if (estado == "erro")
-		return "#ff5d5d";
-	return "#5a5a6c";
+	return "#ff5d5d";
 }
 
 bool estadoAtivo(const QString &estado)
@@ -239,11 +315,11 @@ void setAcao(QPushButton *b, const char *acao)
 struct Linha {
 	QString id;
 	QFrame *raiz = nullptr;
-	QLabel *nome = nullptr;
+	QLabel *icone = nullptr;
 	QLabel *auto_ = nullptr;
-	QLabel *dot = nullptr;
-	QLabel *detalhe = nullptr;
+	LabelElidido *info = nullptr;
 	QPushButton *botao = nullptr;
+	QString barra;
 	QElapsedTimer bloqueio;
 	bool bloqueado = false;
 	bool rodando = false;
@@ -255,7 +331,7 @@ public:
 	{
 		setObjectName("lhmsRoot");
 		setAttribute(Qt::WA_StyledBackground, true);
-		setMinimumWidth(260);
+		setMinimumWidth(220);
 		setStyleSheet(ESTILO);
 
 		auto *externo = new QVBoxLayout(this);
@@ -271,46 +347,46 @@ public:
 		conteudo->setObjectName("lhmsConteudo");
 		scroll->setWidget(conteudo);
 		auto *raiz = new QVBoxLayout(conteudo);
-		raiz->setContentsMargins(10, 10, 10, 10);
-		raiz->setSpacing(10);
+		raiz->setContentsMargins(8, 8, 8, 8);
+		raiz->setSpacing(8);
 
 		/* Block 1: PRINCIPAL */
 		QVBoxLayout *v1 = nullptr;
 		raiz->addWidget(criarBloco(conteudo, T("Principal"), &v1));
-		auto *l1 = new QHBoxLayout();
-		l1->setSpacing(8);
-		principalDot = criarPonto(conteudo);
-		principalChip = criarLabel(conteudo, "chip");
-		principalStatus = criarLabel(conteudo, "status");
-		principalStatus->setTextFormat(Qt::RichText);
-		l1->addWidget(principalDot);
-		l1->addWidget(principalChip);
-		l1->addWidget(principalStatus, 1);
-		v1->addLayout(l1);
-		principalDetalhe = criarMudo(conteudo);
-		v1->addWidget(principalDetalhe);
+		QHBoxLayout *h1 = nullptr;
+		principalRaiz = criarMoldura(conteudo, &h1);
+		principalIcone = criarLabel(principalRaiz, "nome");
+		principalAoVivo = criarLabel(principalRaiz, "aovivo", T("AO VIVO"));
+		principalInfo = new LabelElidido(principalRaiz, "mut");
+		h1->addWidget(principalIcone);
+		h1->addWidget(principalAoVivo);
+		h1->addWidget(principalInfo, 1);
+		v1->addWidget(principalRaiz);
 
 		/* Block 2: PLATAFORMAS */
 		QVBoxLayout *v2 = nullptr;
 		raiz->addWidget(criarBloco(conteudo, T("Plataformas"), &v2));
 		linhasLayout = new QVBoxLayout();
-		linhasLayout->setSpacing(6);
+		linhasLayout->setSpacing(4);
 		v2->addLayout(linhasLayout);
 		vazio = criarMudo(conteudo, T("Nenhuma plataforma extra configurada."));
 		v2->addWidget(vazio);
 		cfgVazio = criarBotaoConfig(conteudo);
-		v2->addWidget(cfgVazio);
+		v2->addWidget(cfgVazio, 0, Qt::AlignLeft);
 
 		/* Block 3: RESUMO */
 		QVBoxLayout *v3 = nullptr;
 		raiz->addWidget(criarBloco(conteudo, T("Resumo"), &v3));
+		auto *hT = new QHBoxLayout();
+		hT->addWidget(criarLabel(conteudo, "mut", T("Upload total")));
+		hT->addStretch(1);
 		uploadTotal = criarLabel(conteudo, "total");
-		uploadTotal->setTextFormat(Qt::RichText);
-		v3->addWidget(uploadTotal);
-		codificador = criarMudo(conteudo);
+		hT->addWidget(uploadTotal);
+		v3->addLayout(hT);
+		codificador = criarMudo(conteudo, QString(), "mut11");
 		v3->addWidget(codificador);
 		cfgResumo = criarBotaoConfig(conteudo);
-		v3->addWidget(cfgResumo);
+		v3->addWidget(cfgResumo, 0, Qt::AlignLeft);
 
 		raiz->addStretch(1);
 
@@ -328,10 +404,11 @@ public:
 	}
 
 private:
-	QLabel *principalDot = nullptr;
-	QLabel *principalChip = nullptr;
-	QLabel *principalStatus = nullptr;
-	QLabel *principalDetalhe = nullptr;
+	QFrame *principalRaiz = nullptr;
+	QString principalBarra;
+	QLabel *principalIcone = nullptr;
+	QLabel *principalAoVivo = nullptr;
+	LabelElidido *principalInfo = nullptr;
 	QVBoxLayout *linhasLayout = nullptr;
 	QLabel *vazio = nullptr;
 	QPushButton *cfgVazio = nullptr;
@@ -364,36 +441,19 @@ private:
 	{
 		Linha *l = new Linha;
 		l->id = id;
-		l->raiz = new QFrame(this);
-		l->raiz->setObjectName("linha");
-		l->raiz->setStyleSheet(QString("QFrame#linha{background:#1d1d27;border:none;"
-					       "border-left:4px solid %1;border-radius:8px;}")
-					       .arg(corPlataforma(id)));
-		auto *v = new QVBoxLayout(l->raiz);
-		v->setContentsMargins(10, 8, 10, 8);
-		v->setSpacing(2);
-
-		auto *h1 = new QHBoxLayout();
-		h1->setSpacing(8);
-		l->dot = criarPonto(l->raiz);
-		l->nome = criarLabel(l->raiz, "nome");
+		QHBoxLayout *h = nullptr;
+		l->raiz = criarMoldura(this, &h);
+		l->icone = criarLabel(l->raiz, "nome");
 		l->auto_ = criarLabel(l->raiz, "pill", T("AUTO"));
 		l->auto_->setToolTip(T("Liga sozinha junto com a principal"));
+		l->info = new LabelElidido(l->raiz, "mut");
 		l->botao = new QPushButton(T("Iniciar"), l->raiz);
 		l->botao->setCursor(Qt::PointingHandCursor);
 		setAcao(l->botao, "iniciar");
-		h1->addWidget(l->dot);
-		h1->addWidget(l->nome);
-		h1->addWidget(l->auto_);
-		h1->addStretch(1);
-		h1->addWidget(l->botao);
-		v->addLayout(h1);
-
-		l->detalhe = criarLabel(l->raiz, "mut");
-		l->detalhe->setTextFormat(Qt::RichText);
-		l->detalhe->setWordWrap(true);
-		l->detalhe->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-		v->addWidget(l->detalhe);
+		h->addWidget(l->icone);
+		h->addWidget(l->auto_);
+		h->addWidget(l->info, 1);
+		h->addWidget(l->botao);
 
 		QObject::connect(l->botao, &QPushButton::clicked, this, [this, l] { clicou(l); });
 		linhasLayout->addWidget(l->raiz);
@@ -434,29 +494,16 @@ private:
 		struct saida_info infos[MAX_LINHAS];
 		size_t n = saidas_snapshot(infos, MAX_LINHAS);
 
-		QString plat = T("OBS");
 		QString p = QString::fromUtf8(pi.plataforma);
-		if (p == "twitch")
-			plat = "Twitch";
-		else if (p == "youtube")
-			plat = "YouTube";
-		else if (p == "kick")
-			plat = "Kick";
-		else if (p == "tiktok")
-			plat = "TikTok";
-		setTextoSe(principalChip, plat);
-		setEstiloSe(principalChip, QString("background:#1d1d27;border-left:4px solid %1;border-radius:6px;"
-						   "padding:3px 8px;font-weight:700;")
-						   .arg(corPlataforma(p)));
-		pintarPonto(principalDot, pi.ao_vivo ? "#3ddc84" : "#5a5a6c");
-		if (pi.ao_vivo) {
-			setTextoSe(principalStatus, T("<b style='color:#ff6369'>AO VIVO</b>"));
-			setTextoSe(principalDetalhe,
-				   T("%1 kbps · %2 perdidos").arg(num(pi.kbps)).arg(num(pi.quadros_perdidos)));
-		} else {
-			setTextoSe(principalStatus, T("<span style='color:#a6a6b8'>Fora do ar</span>"));
-			setTextoSe(principalDetalhe, T("Liga pelo botão Iniciar transmissão do OBS"));
-		}
+		QString nomeP = nomePlataforma(p);
+		aplicarIcone(principalIcone, nomeP.isEmpty() ? QString() : p, nomeP.isEmpty() ? T("OBS") : nomeP);
+		pintarBarra(principalRaiz, &principalBarra, pi.ao_vivo ? "#3ddc84" : "#ff5d5d");
+		principalAoVivo->setVisible(pi.ao_vivo);
+		if (pi.ao_vivo)
+			principalInfo->setCompleto(
+				T("· %1 kbps · %2 perdidos").arg(num(pi.kbps)).arg(num(pi.quadros_perdidos)));
+		else
+			principalInfo->setCompleto(T("Fora do ar — liga pelo botão do OBS"));
 
 		/* Rebuild rows only when the set of ids changes. */
 		QStringList novos;
@@ -483,14 +530,19 @@ private:
 			if (l->rodando)
 				total += si.kbps;
 
-			setTextoSe(l->nome, QString::fromUtf8(si.nome));
+			QString nomeL = QString::fromUtf8(si.nome);
+			QString nomeKnown = nomePlataforma(QString::fromUtf8(si.id));
+			aplicarIcone(l->icone, nomeKnown.isEmpty() ? QString() : QString::fromUtf8(si.id), nomeL);
 			l->auto_->setVisible(si.ativo);
-			pintarPonto(l->dot, corPonto(estado));
-			QString det = QString("<span style='color:%1'>%2</span>")
-					      .arg(corTexto(estado), textoEstado(estado, QString::fromUtf8(si.erro)));
-			if (l->rodando)
-				det += T(" · %1 kbps · %2 perdidos").arg(num(si.kbps)).arg(num(si.quadros_perdidos));
-			setTextoSe(l->detalhe, det);
+			pintarBarra(l->raiz, &l->barra, corBarra(estado));
+			if (estado == "ao_vivo") {
+				setEstiloSe(l->info, "color:#a6a6b8;");
+				l->info->setCompleto(
+					T("%1 kbps · %2 perdidos").arg(num(si.kbps)).arg(num(si.quadros_perdidos)));
+			} else {
+				setEstiloSe(l->info, QString("color:%1;").arg(corTexto(estado)));
+				l->info->setCompleto(textoEstado(estado, QString::fromUtf8(si.erro)));
+			}
 			QString txtBotao = l->rodando ? T("Parar") : T("Iniciar");
 			if (l->botao->text() != txtBotao)
 				l->botao->setText(txtBotao);
@@ -502,9 +554,7 @@ private:
 				l->botao->setEnabled(hab);
 		}
 
-		setTextoSe(uploadTotal,
-			   QString("%1<span style='font-size:13px;font-weight:400;color:#a6a6b8'>%2</span>")
-				   .arg(num(total), T(" kbps de upload")));
+		setTextoSe(uploadTotal, T("%1 kbps").arg(num(total)));
 		if (pi.encoder_proprio[0])
 			setTextoSe(codificador, T("Codificador próprio: %1 · %2 kbps")
 							.arg(nomeEncoder(QString::fromUtf8(pi.encoder_proprio)))
