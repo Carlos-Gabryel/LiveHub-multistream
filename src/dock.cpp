@@ -107,6 +107,7 @@ public:
 	LabelElidido(QWidget *pai, const char *nome) : QLabel(pai)
 	{
 		setObjectName(nome);
+		setTextFormat(Qt::PlainText); /* names come from config: never parse markup */
 		setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 		setMinimumWidth(0);
 	}
@@ -132,7 +133,7 @@ private:
 		QString e = fontMetrics().elidedText(completo_, Qt::ElideRight, qMax(0, width()));
 		if (text() != e)
 			setText(e);
-		setToolTip(e != completo_ ? completo_ : QString());
+		setToolTip(e != completo_ ? completo_.toHtmlEscaped() : QString());
 	}
 };
 

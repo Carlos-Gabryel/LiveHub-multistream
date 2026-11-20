@@ -161,6 +161,17 @@ static size_t contar_caracteres(const char *s)
 	return n;
 }
 
+/* Control characters or markup (<, >) are never valid in a display name. */
+static bool tem_controle_ou_markup(const char *s)
+{
+	for (; *s; s++) {
+		unsigned char c = (unsigned char)*s;
+		if (c < 0x20 || c == 0x7f || c == '<' || c == '>')
+			return true;
+	}
+	return false;
+}
+
 static bool id_valido(const char *id)
 {
 	size_t len = strlen(id);
@@ -190,7 +201,7 @@ static const char *validar(obs_data_t *item, struct saida *dst)
 		return "servidor_invalido";
 	if (strlen(key) < 1 || strlen(key) > MAX_KEY || tem_espaco_ou_controle(key))
 		return "key_invalida";
-	if (contar_caracteres(nome) > MAX_NOME || strlen(nome) >= sizeof(dst->nome))
+	if (contar_caracteres(nome) > MAX_NOME || strlen(nome) >= sizeof(dst->nome) || tem_controle_ou_markup(nome))
 		return "nome_invalido";
 	const char *formato = obs_data_has_user_value(item, "formato") ? obs_data_get_string(item, "formato")
 								       : "horizontal";
