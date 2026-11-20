@@ -43,7 +43,7 @@ Resposta (**nunca inclui a key**):
              "bytes": 123456, "quadros_perdidos": 0, "desde": 1795100000}]}
 ```
 - `ao_vivo`: a saída principal do OBS está transmitindo.
-- `multitrack`: a saída principal não tem encoder de vídeo simples, como no Enhanced Broadcasting da Twitch. Nesse caso as saídas extras não iniciam e ficam com `erro: "multitrack"`.
+- `multitrack`: a saída principal não tem encoder de vídeo simples, como no Enhanced Broadcasting da Twitch. Nesse caso as extras usam o codificador próprio (ver abaixo).
 - `estado`: `parado` | `conectando` | `ao_vivo` | `reconectando` | `erro`.
 - `erro`: `""` | `key_invalida` | `falha_conexao` | `desconectado` | `sem_encoder` | `multitrack` | `outro`.
 - `desde`: momento (unix, em segundos) em que a saída entrou `ao_vivo`. Fica `0` fora do ar.
@@ -54,6 +54,15 @@ Resposta: `{"ok": true}` ou `{"ok": false, "erro": "id_desconhecido"}`.
 
 ## Eventos
 - `saida_estado`: `{"id": "kick", "estado": "reconectando", "erro": ""}`. É emitido a cada mudança de estado de uma saída.
+
+## Enhanced Broadcasting (multitrack) — codificador próprio
+Quando a saída principal é multitrack (Enhanced Broadcasting da Twitch), não existe um encoder simples para compartilhar. As saídas extras passam a usar um **par de encoders próprio do plugin**. É uma codificação a mais, e todas as extras compartilham essa mesma codificação.
+
+- O request `saidas.definir` aceita os campos opcionais `"bitrate_proprio"` (kbps, inteiro de 1000 a 20000, padrão 6000) e `"encoder_proprio"` (`""` = automático, ou o id de um encoder de vídeo do OBS).
+- No modo automático, a escolha do encoder segue esta ordem, usando o primeiro que existir: `obs_nvenc_h264_tex`, `jim_nvenc`, `h264_texture_amf`, `obs_qsv11_v2`, `obs_qsv11`, `obs_x264`.
+- Configuração do encoder de vídeo: `rate_control` CBR, `bitrate` = bitrate_proprio, `keyint_sec` 2. Áudio: AAC (`ffmpeg_aac`, ou `CoreAudio_AAC` se existir) a 160 kbps, na trilha/mixer 0.
+- Os encoders próprios são criados quando a primeira saída extra inicia no modo multitrack e liberados quando a última para.
+- O `saidas.status` ganha `"encoder_proprio": "<id em uso ou \"\">"`. Com codificador próprio, as extras **não ficam em erro**: `multitrack: true` passa a ser só informativo. O erro `multitrack` só acontece se nenhum encoder puder ser criado (aí o erro é `sem_encoder`).
 
 ## Comportamento
 - As saídas extras **iniciam** quando a principal entra no ar (`OBS_FRONTEND_EVENT_STREAMING_STARTED`) e **param** quando ela para (`STREAMING_STOPPING`).
