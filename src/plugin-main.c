@@ -26,7 +26,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "dock.hpp"
 
 #define LHMS_VENDOR_NAME "livehub-multistream"
-#define LHMS_API_VERSION 7
+#define LHMS_API_VERSION 8
 #define LHMS_WS_MIN_API 2 /* obs-websocket API version with vendor requests */
 #define LHMS_OBS_MIN_VERSION MAKE_SEMANTIC_VERSION(31, 1, 0)
 

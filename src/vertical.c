@@ -73,6 +73,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 static pthread_mutex_t s_vlock;
 static bool s_vok = false;
 static obs_canvas_t *s_canvas = NULL;
+static obs_data_t *s_trv = NULL;   /* map: frontend transition name -> settings overlaid on the private copy (guarded by s_vlock) */
 static obs_data_t *s_lig = NULL;   /* map: main scene name -> vertical scene name (only while the canvas exists) */
 static obs_data_t *s_dados = NULL; /* data stashed by the load callback, waiting for the canvas */
 static obs_data_t *s_snap = NULL;  /* snapshot taken when the canvas was torn down, for the pending save */
@@ -247,11 +248,27 @@ static obs_data_t *tr_item(const char *nome)
 	return r;
 }
 
+/* Effective settings = the item's settings with the per-transition override (`ov`, may be NULL) applied on top.
+ * Pure (no globals): returns a new object (release); never mutates `base` or `ov`. */
+static obs_data_t *tr_efetivo(obs_data_t *base, obs_data_t *ov)
+{
+	obs_data_t *r = obs_data_create();
+	if (base)
+		obs_data_apply(r, base);
+	if (ov)
+		obs_data_apply(r, ov);
+	return r;
+}
+
 /* Returns the cached private transition for `item` (created/updated when the type or settings changed). */
 static obs_source_t *tr_obter(obs_source_t **slot, char **json_slot, obs_data_t *item)
 {
 	const char *id = obs_data_get_string(item, "id");
-	obs_data_t *st = obs_data_get_obj(item, "settings");
+	obs_data_t *base = obs_data_get_obj(item, "settings");
+	obs_data_t *ov = s_trv ? obs_data_get_obj(s_trv, obs_data_get_string(item, "name")) : NULL;
+	obs_data_t *st = tr_efetivo(base, ov);
+	obs_data_release(base);
+	obs_data_release(ov);
 	const char *js = obs_data_get_json(st);
 	if (*slot && strcmp(obs_source_get_id(*slot), id) != 0) {
 		obs_transition_clear(*slot);
@@ -537,6 +554,8 @@ static obs_data_t *serializar(obs_canvas_t *c, obs_data_t *lig)
 	obs_data_array_release(ord);
 	if (lig)
 		obs_data_set_obj(d, "ligacoes", lig);
+	if (s_trv)
+		obs_data_set_obj(d, "transicoes_vertical", s_trv);
 	return d;
 }
 
@@ -659,6 +678,8 @@ static void montar(void)
 
 		obs_data_release(s_lig);
 		s_lig = obs_data_get_obj(s_dados, "ligacoes");
+		obs_data_release(s_trv);
+		s_trv = obs_data_get_obj(s_dados, "transicoes_vertical");
 		ordem_carregar(s_dados);
 
 		obs_scene_t *sc = achar_cena(obs_data_get_string(s_dados, "ativa"));
@@ -673,6 +694,8 @@ static void montar(void)
 	}
 	if (!s_lig)
 		s_lig = obs_data_create();
+	if (!s_trv)
+		s_trv = obs_data_create();
 	ordem_sync(c);
 	obs_data_release(s_dados);
 	s_dados = NULL;
@@ -735,6 +758,8 @@ static void desmontar(bool guardar)
 	ordem_limpar();
 	obs_data_t *lig = s_lig;
 	s_lig = NULL;
+	obs_data_release(s_trv);
+	s_trv = NULL;
 	obs_source_t *tr = s_tr, *tr_ov = s_tr_ov;
 	char *j1 = s_tr_json, *j2 = s_tr_ov_json;
 	s_tr = s_tr_ov = NULL;
@@ -877,6 +902,8 @@ void vertical_liberar(void)
 	obs_data_release(s_dados);
 	obs_data_release(s_snap);
 	obs_data_release(s_lig);
+	obs_data_release(s_trv);
+	s_trv = NULL;
 	s_dados = s_snap = s_lig = NULL;
 	obs_data_release(s_trcfg);
 	s_trcfg = NULL;
@@ -1516,6 +1543,76 @@ static bool h_lig_listar(obs_data_t *rq, obs_data_t *rs)
 	return false;
 }
 
+static bool h_tr_listar(obs_data_t *rq, obs_data_t *rs)
+{
+	UNUSED_PARAMETER(rq);
+	obs_data_set_bool(rs, "ok", true);
+	obs_data_set_string(rs, "atual", s_trcfg ? obs_data_get_string(s_trcfg, "atual") : "");
+	obs_data_array_t *out = obs_data_array_create();
+	obs_data_array_t *lista = s_trcfg ? obs_data_get_array(s_trcfg, "lista") : NULL;
+	size_t n = lista ? obs_data_array_count(lista) : 0;
+	for (size_t i = 0; i < n; i++) {
+		obs_data_t *it = obs_data_array_item(lista, i);
+		const char *nome = obs_data_get_string(it, "name");
+		obs_data_t *o = obs_data_create();
+		obs_data_set_string(o, "nome", nome);
+		obs_data_set_string(o, "id", obs_data_get_string(it, "id"));
+		obs_data_t *st = obs_data_get_obj(it, "settings");
+		obs_data_set_obj(o, "settings", st);
+		obs_data_release(st);
+		obs_data_t *aj = s_trv ? obs_data_get_obj(s_trv, nome) : NULL;
+		if (aj) /* without an override the key is omitted (null for the client) */
+			obs_data_set_obj(o, "ajuste", aj);
+		obs_data_release(aj);
+		obs_data_array_push_back(out, o);
+		obs_data_release(o);
+		obs_data_release(it);
+	}
+	obs_data_array_release(lista);
+	obs_data_set_array(rs, "lista", out);
+	obs_data_array_release(out);
+	return false;
+}
+
+static bool h_tr_ajustar(obs_data_t *rq, obs_data_t *rs)
+{
+	const char *nome = obs_data_get_string(rq, "nome");
+	if (!nome || !*nome || strlen(nome) > 256)
+		return erro(rs, "parametro_invalido");
+	obs_data_t *it = tr_item(nome);
+	if (!it)
+		return erro(rs, "transicao_inexistente");
+	obs_data_release(it);
+
+	obs_data_t *novo = NULL;
+	if (obs_data_has_user_value(rq, "settings")) {
+		novo = obs_data_get_obj(rq, "settings");
+		if (!novo)
+			return erro(rs, "parametro_invalido");
+		obs_data_item_t *p = obs_data_first(novo);
+		if (!p) { /* empty = remove */
+			obs_data_release(novo);
+			novo = NULL;
+		} else {
+			obs_data_item_release(&p);
+		}
+	}
+	if (!s_trv)
+		s_trv = obs_data_create();
+	if (novo) {
+		obs_data_set_obj(s_trv, nome, novo);
+		obs_data_release(novo);
+	} else {
+		obs_data_unset_user_value(s_trv, nome);
+	}
+	/* force the next activation to re-apply the effective settings */
+	bfree(s_tr_json);
+	s_tr_json = NULL;
+	bfree(s_tr_ov_json);
+	s_tr_ov_json = NULL;
+	return sucesso(rs, true);
+}
+
 static bool h_clone_criar(obs_data_t *rq, obs_data_t *rs)
 {
 	if (!obs_data_has_user_value(rq, "nome") || !obs_data_has_user_value(rq, "fonte"))
@@ -1563,6 +1660,8 @@ static const struct req_def REQS[] = {
 	{"vertical.cena.ativar", h_cena_ativar, true},
 	{"vertical.ligacoes.definir", h_lig_definir, true},
 	{"vertical.ligacoes.listar", h_lig_listar, true},
+	{"vertical.transicao.listar", h_tr_listar, false},
+	{"vertical.transicao.ajustar", h_tr_ajustar, true},
 	{"vertical.cenas.duplicar", h_cenas_duplicar, true},
 	{"vertical.cenas.mover", h_cenas_mover, true},
 	{"vertical.item.bloquear", h_item_bloquear, true},
