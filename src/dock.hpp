@@ -33,6 +33,8 @@ void lhms_dock_remover(void);
 void lhms_vdocks_registrar(void);
 void lhms_vdocks_desligando(void);
 void lhms_vdocks_remover(void);
+/* Self-test mode (env LHMS_SELFTEST=<dir>), see src/selftest.cpp. Call after FINISHED_LOADING. */
+void lhms_selftest_agendar(void);
 
 #ifdef __cplusplus
 }

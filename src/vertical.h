@@ -64,6 +64,9 @@ obs_source_t *vertical_cena_ativa_ref(void);
 /* Called on the UI thread right before the canvas is torn down (collection switch / exit): the UI must drop
  * its canvas references and displays. Pass NULL to unregister. */
 void vertical_ui_ao_desmontar(void (*cb)(void *), void *dados);
+/* Additional teardown hooks (up to 8, UI thread only), independent of the single hook above. */
+void vertical_ui_hook_adicionar(void (*cb)(void *), void *dados);
+void vertical_ui_hook_remover(void (*cb)(void *), void *dados);
 
 struct vertical_cena {
 	char nome[VERTICAL_NOME_MAX];

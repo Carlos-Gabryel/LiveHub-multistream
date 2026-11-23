@@ -63,6 +63,7 @@ static void on_frontend_event(enum obs_frontend_event event, void *private_data)
 		saidas_frontend_pronto(true);
 		lhms_dock_registrar(); /* frontend events run on the Qt UI thread */
 		lhms_vdocks_registrar();
+		lhms_selftest_agendar();
 		break;
 	case OBS_FRONTEND_EVENT_STREAMING_STARTED:
 		saidas_principal_iniciou();

@@ -81,6 +81,11 @@ static volatile bool s_disp = false;
 static volatile long s_versao = 1;
 static void (*s_ui_cb)(void *) = NULL; /* UI hook, set/called on the UI thread only */
 static void *s_ui_dados = NULL;
+#define UI_HOOKS_MAX 8
+static struct {
+	void (*cb)(void *);
+	void *dados;
+} s_ui_hooks[UI_HOOKS_MAX];
 
 static void ordem_sync(obs_canvas_t *c);
 
@@ -510,6 +515,9 @@ static void desmontar(bool guardar)
 
 	if (s_ui_cb) /* the UI drops its canvas references and displays before the teardown */
 		s_ui_cb(s_ui_dados);
+	for (int i = 0; i < UI_HOOKS_MAX; i++)
+		if (s_ui_hooks[i].cb)
+			s_ui_hooks[i].cb(s_ui_hooks[i].dados);
 
 	saidas_parar_verticais(); /* the vertical encoders use the canvas video */
 
@@ -1308,6 +1316,27 @@ void vertical_ui_ao_desmontar(void (*cb)(void *), void *dados)
 {
 	s_ui_dados = dados;
 	s_ui_cb = cb;
+}
+
+void vertical_ui_hook_adicionar(void (*cb)(void *), void *dados)
+{
+	for (int i = 0; i < UI_HOOKS_MAX; i++) {
+		if (!s_ui_hooks[i].cb) {
+			s_ui_hooks[i].cb = cb;
+			s_ui_hooks[i].dados = dados;
+			return;
+		}
+	}
+}
+
+void vertical_ui_hook_remover(void (*cb)(void *), void *dados)
+{
+	for (int i = 0; i < UI_HOOKS_MAX; i++) {
+		if (s_ui_hooks[i].cb == cb && s_ui_hooks[i].dados == dados) {
+			s_ui_hooks[i].cb = NULL;
+			s_ui_hooks[i].dados = NULL;
+		}
+	}
 }
 
 struct ctx_cenas {
