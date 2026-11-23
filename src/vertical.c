@@ -116,7 +116,8 @@ const char *const VERTICAL_REQUESTS[] = {
 	"vertical.cenas.renomear",   "vertical.cena.itens",     "vertical.item.adicionar", "vertical.item.transformar",
 	"vertical.item.visivel",     "vertical.item.ordem",     "vertical.item.remover",   "vertical.cena.ativar",
 	"vertical.ligacoes.definir", "vertical.ligacoes.listar", "vertical.cenas.duplicar", "vertical.cenas.mover",
-	"vertical.item.bloquear", "vertical.clone.criar", "vertical.clone.ajustar"};
+	"vertical.item.bloquear", "vertical.clone.criar", "vertical.clone.ajustar", "vertical.transicao.listar",
+	"vertical.transicao.ajustar"};
 const size_t VERTICAL_REQUESTS_N = sizeof(VERTICAL_REQUESTS) / sizeof(VERTICAL_REQUESTS[0]);
 
 /* ---------- helpers ---------- */
