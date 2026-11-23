@@ -9,7 +9,7 @@ O plugin registra no obs-websocket (v5) o vendor **`livehub-multistream`**. Os c
 
 A resposta chega em `responseData.responseData`. Para receber os eventos do vendor, o cliente precisa assinar `EventSubscription::Vendors` (`1 << 9` = 512).
 
-**Versão da API: 8** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio`, `modo_encoder` e `encoder_proprio`/`modo_encoder` no `saidas.status`).
+**Versão da API: 7** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio`, `modo_encoder` e `encoder_proprio`/`modo_encoder` no `saidas.status`).
 
 **API 4** (painel do OBS): adiciona `saida.iniciar`/`saida.parar`, o campo `kbps` em cada saída do `saidas.status` e o bloco `principal`.
 
@@ -20,8 +20,6 @@ A resposta chega em `responseData.responseData`. Para receber os eventos do vend
 ## Requests
 
 **API 7** (clone com opacidade): tipo de fonte `livehub_clone` (nome "LiveHub Clone"; configurações `fonte` e `opacidade` 0-100) e os requests `vertical.clone.criar` e `vertical.clone.ajustar`.
-
-**API 8** (ajustes por transição do vertical): requests `vertical.transicao.listar` e `vertical.transicao.ajustar`; os ajustes ficam salvos na coleção, em `livehub_vertical.transicoes_vertical`.
 
 ### `saida.iniciar` / `saida.parar` (API 4)
 Request: `{"id": "youtube"}`. Liga ou para **agora** só essa saída. Não muda o `ativo` gravado: `ativo` continua significando "liga sozinha quando a principal entrar no ar".
@@ -76,7 +74,7 @@ Resposta: `{"ok": true}` ou `{"ok": false, "erro": "id_desconhecido"}`.
 
 - **Canvas:** `LiveHub Vertical`, base e saída 1080×1920. FPS, formato de cor e espaço de cor vêm do vídeo principal. Flags `ACTIVATE | SCENE_REF | EPHEMERAL`, **sem** `MIX_AUDIO`: o áudio das saídas verticais é só a mixagem principal (`obs_get_audio()`), então nada toca em dobro.
 - **Persistência:** as cenas verticais ficam **dentro da coleção de cenas** do OBS, na chave `livehub_vertical` dos dados de módulos: `{"versao": 1, "cenas": [<obs_save_source>...], "ativa": "<cena>", "ligacoes": {"<cena horizontal>": "<cena vertical>"}}`. Cada coleção tem o seu vertical. Trocar de coleção desmonta o canvas (parando antes as saídas verticais) e remonta com os dados da nova. As fontes dos itens são as mesmas fontes globais da coleção (por uuid/nome), sem duplicar. Alterações pelos requests marcam a coleção como alterada e o OBS salva no ciclo normal.
-- **Troca automática:** no `SCENE_CHANGED` (ou `TRANSITION_STOPPED`) do OBS, a cena **de programa** (no modo estúdio também) é procurada em `ligacoes`. Se houver ligação, a cena vertical vira o canal 0 do canvas, com a transição (cópia privada da transição do OBS, ou a da cena, se houver; com os ajustes por transição aplicados por cima, se existirem). Sem ligação, a vertical atual continua. `vertical.cena.ativar` troca na mão; a próxima mudança de cena horizontal ligada volta a trocar sozinha.
+- **Troca automática:** no `SCENE_CHANGED` (ou `TRANSITION_STOPPED`) do OBS, a cena **de programa** (no modo estúdio também) é procurada em `ligacoes`. Se houver ligação, a cena vertical vira o canal 0 do canvas (corte seco). Sem ligação, a vertical atual continua. `vertical.cena.ativar` troca na mão; a próxima mudança de cena horizontal ligada volta a trocar sozinha.
 - **Saídas verticais:** uma saída com `"formato": "vertical"` usa **sempre** o par de encoders próprio vertical (mesma escolha automática de encoder, `bitrate_proprio` e `encoder_proprio` do par horizontal; áudio AAC 160 kbps), ligado a `obs_canvas_get_video` + `obs_get_audio()`. O par é criado quando a primeira saída vertical inicia e liberado quando a última para; todas as verticais o compartilham. Independente do `modo_encoder`. Elas iniciam com a principal (se `ativo`) ou manualmente (`saida.iniciar`), como as outras. Ao desmontar o canvas, as verticais param; quando o canvas volta, as `ativo` religam sozinhas se a principal está no ar.
 - Nomes de cena vertical: 1 a 64 caracteres, sem caracteres de controle nem `<` `>`. Nomes são únicos dentro do canvas vertical e **não** aparecem na lista de cenas do OBS (nem colidem com as cenas horizontais). Limites: 32 cenas, 128 itens por cena.
 - Todos os requests abaixo respondem `{"ok": true, ...}` ou `{"ok": false, "erro": "<motivo>"}`. Erros comuns: `canvas_indisponivel` (canvas não existe, exceto em `vertical.status`), `cena_inexistente`, `item_inexistente`, `parametro_invalido` (campo ausente, fora de faixa ou de tipo errado; nada é alterado).
@@ -133,19 +131,13 @@ Request: `{"nome": "LH clone Camera 1", "fonte": "Câmera", "opacidade": 50}` (`
 Request: `{"nome": "LH clone Camera 1", "opacidade": 80}`. Resposta: `{"ok": true}`. Erros: `parametro_invalido`, `fonte_inexistente`, `fonte_invalida` (não é um clone).
 
 ### `vertical.cena.ativar`
-Request: `{"nome": "Jogo"}`. Coloca a cena no canal 0 do canvas, usando a transição do vertical (cópia privada da transição do OBS, ou a da cena, com os ajustes por transição se existirem). Erro: `cena_inexistente`.
+Request: `{"nome": "Jogo"}`. Coloca a cena no canal 0 do canvas (corte seco). Erro: `cena_inexistente`.
 
 ### `vertical.ligacoes.definir`
 Request: `{"ligacoes": {"Cena Jogo": "Jogo", "Cena Papo": "Papo"}}`. Substitui o mapa inteiro (chave = nome da cena horizontal, qualquer texto até 256 caracteres; valor = cena vertical, que precisa existir). Depois de gravar, já aplica a ligação da cena de programa atual. Erros: `parametro_invalido` (valor que não é texto), `cena_inexistente`. Nada muda se der erro.
 
 ### `vertical.ligacoes.listar`
 Request: `{}`. Resposta: `{"ok": true, "ligacoes": {"Cena Jogo": "Jogo"}}`.
-
-### `vertical.transicao.listar`
-Request: `{}`. Resposta: `{"ok": true, "atual": "Fade", "lista": [{"nome": "Fade", "id": "fade_transition", "settings": {...}, "ajuste": {...}}]}`. `settings` são os da transição do OBS; `ajuste` só aparece quando existe um ajuste (ausente = sem ajuste).
-
-### `vertical.transicao.ajustar`
-Request: `{"nome": "Stinger", "settings": {"path": "C:/.../Stinger-vertical.webm"}}`. O objeto `settings` entra por cima dos settings da transição do OBS ao criar a cópia privada do vertical. `settings` ausente, `null` ou `{}` remove o ajuste. Salva na coleção e vale já na próxima troca de cena. Resposta: `{"ok": true}`. Erros: `parametro_invalido` (nome vazio ou `settings` que não é objeto), `transicao_inexistente` (nome fora da lista de transições do OBS).
 
 ## Eventos
 - `saida_estado`: `{"id": "kick", "estado": "reconectando", "erro": ""}`. É emitido a cada mudança de estado de uma saída.
