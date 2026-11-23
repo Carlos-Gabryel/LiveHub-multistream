@@ -53,8 +53,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-frontend-api.h>
 #include <util/threading.h>
 #include <util/darray.h>
-#include <util/dstr.h>
-#include <util/platform.h>
 #include <plugin-support.h>
 #include <string.h>
 #include <stdio.h>
@@ -1577,32 +1575,6 @@ static bool h_tr_listar(obs_data_t *rq, obs_data_t *rs)
 	return false;
 }
 
-/* Only the documented override is accepted: {"path": <existing local video file>}. No other keys, no URLs, no
- * network (UNC) paths, only video extensions; keeps the override from becoming a generic settings injector. */
-static bool tr_ajuste_valido(obs_data_t *aj)
-{
-	obs_data_item_t *p = obs_data_first(aj);
-	size_t n = 0;
-	bool ok = true;
-	for (; p; obs_data_item_next(&p)) {
-		n++;
-		if (strcmp(obs_data_item_get_name(p), "path") != 0 || obs_data_item_gettype(p) != OBS_DATA_STRING)
-			ok = false;
-	}
-	if (!ok || n != 1)
-		return false;
-	const char *path = obs_data_get_string(aj, "path");
-	size_t len = path ? strlen(path) : 0;
-	if (len < 5 || len > 1024 || strstr(path, "://") || strstr(path, "..") ||
-	    ((path[0] == '\\' || path[0] == '/') && (path[1] == '\\' || path[1] == '/')))
-		return false;
-	const char *ext = strrchr(path, '.');
-	if (!ext || (astrcmpi(ext, ".webm") != 0 && astrcmpi(ext, ".mov") != 0 && astrcmpi(ext, ".mp4") != 0 &&
-		     astrcmpi(ext, ".mkv") != 0))
-		return false;
-	return os_file_exists(path);
-}
-
 static bool h_tr_ajustar(obs_data_t *rq, obs_data_t *rs)
 {
 	const char *nome = obs_data_get_string(rq, "nome");
@@ -1624,10 +1596,6 @@ static bool h_tr_ajustar(obs_data_t *rq, obs_data_t *rs)
 			novo = NULL;
 		} else {
 			obs_data_item_release(&p);
-			if (!tr_ajuste_valido(novo)) {
-				obs_data_release(novo);
-				return erro(rs, "parametro_invalido");
-			}
 		}
 	}
 	if (!s_trv)
