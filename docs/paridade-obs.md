@@ -50,11 +50,11 @@ action) and the same for our docks, writes them to `<dir>`, and logs `[LHMS self
 side; differences other than vertical/horizontal content are bugs. The self-test must never modify scenes, sources
 or settings.
 
-Restarting the owner's OBS for a test: close it gracefully (`(Get-Process obs64).CloseMainWindow()`, wait for exit),
-install (`cmake --install build_x64 --config RelWithDebInfo --prefix C:\ProgramData\obs-studio\plugins`, then delete
-only `C:\ProgramData\obs-studio\plugins\LiveHub-multistream\bin\64bit\*.pdb`), start
-`C:\Program Files\obs-studio\bin\64bit\obs64.exe` with that folder as working directory. Never start streaming or
-recording. Scene collection backup: `F:\Backups\obs-studio-20261122-2214`.
+Testing: use an isolated **portable** OBS copy (`portable_mode.txt`) with the conflicting third-party plugins
+disabled in `config/obs-studio/plugin_manager/modules.json`, streaming pointed to a local RTMP server and
+obs-websocket on a separate port. Portable mode only loads plugins from the copy itself, so install the plugin in the
+classic layout (`obs-plugins/64bit/LiveHub-multistream.dll` + `data/obs-plugins/LiveHub-multistream/`). Close OBS
+gracefully before replacing the DLL. Never start streaming or recording, and back up the scene collections first.
 
 ## Progress
 (each task appends: what was ported, commit, self-test result)
