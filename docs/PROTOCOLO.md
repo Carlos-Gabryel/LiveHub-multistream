@@ -9,7 +9,7 @@ O plugin registra no obs-websocket (v5) o vendor **`livehub-multistream`**. Os c
 
 A resposta chega em `responseData.responseData`. Para receber os eventos do vendor, o cliente precisa assinar `EventSubscription::Vendors` (`1 << 9` = 512).
 
-**Versão da API: 6** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio`, `modo_encoder` e `encoder_proprio`/`modo_encoder` no `saidas.status`).
+**Versão da API: 7** (a fase 1 adicionou as saídas extras; a API 3 adiciona os campos do codificador próprio: `bitrate_proprio`, `encoder_proprio`, `modo_encoder` e `encoder_proprio`/`modo_encoder` no `saidas.status`).
 
 **API 4** (painel do OBS): adiciona `saida.iniciar`/`saida.parar`, o campo `kbps` em cada saída do `saidas.status` e o bloco `principal`.
 
@@ -19,6 +19,8 @@ A resposta chega em `responseData.responseData`. Para receber os eventos do vend
 
 ## Requests
 
+**API 7** (clone com opacidade): tipo de fonte `livehub_clone` (nome "LiveHub Clone"; configurações `fonte` e `opacidade` 0-100) e os requests `vertical.clone.criar` e `vertical.clone.ajustar`.
+
 ### `saida.iniciar` / `saida.parar` (API 4)
 Request: `{"id": "youtube"}`. Liga ou para **agora** só essa saída. Não muda o `ativo` gravado: `ativo` continua significando "liga sozinha quando a principal entrar no ar".
 - Pode ser chamado com a principal fora do ar. Nesse caso a saída usa o **codificador próprio**, porque o encoder da principal não está rodando.
@@ -27,7 +29,7 @@ Request: `{"id": "youtube"}`. Liga ou para **agora** só essa saída. Não muda 
 - Respostas: `{"ok": true}`, `{"ok": false, "erro": "id_desconhecido"}` ou `{"ok": false, "erro": "sem_encoder"}`.
 
 ### `status`
-Resposta: `{"plugin_versao": "0.7.0", "obs_versao": "33.0.1", "api": 6}`
+Resposta: `{"plugin_versao": "0.7.0", "obs_versao": "33.0.1", "api": 7}`
 
 ### `saidas.definir`
 Substitui a lista inteira de saídas extras e grava em `obs_module_config_path("saidas.json")`. O plugin continua funcionando sem o LiveHub aberto.
@@ -121,6 +123,12 @@ Request: `{"cena": "Jogo", "id": 7, "posicao": 2}`. `posicao` 0 = fundo; é limi
 
 ### `vertical.item.remover`
 Request: `{"cena": "Jogo", "id": 7}`. Resposta: `{"ok": true}`. Não mexe na fonte, só tira o item da cena vertical.
+
+### `vertical.clone.criar`
+Request: `{"nome": "LH clone Camera 1", "fonte": "Câmera", "opacidade": 50}` (`opacidade` 0-100, padrão 100). Cria uma fonte global `livehub_clone` oculta nas listas da UI (mas salva na coleção e encontrável por nome, então `vertical.item.adicionar` a aceita) que mostra a `fonte` com a opacidade dada. Se já existir um clone com esse `nome`, só ajusta a fonte/opacidade. Não precisa do canvas. Resposta: `{"ok": true}`. Erros: `parametro_invalido`, `fonte_inexistente`, `nome_em_uso` (existe fonte de outro tipo).
+
+### `vertical.clone.ajustar`
+Request: `{"nome": "LH clone Camera 1", "opacidade": 80}`. Resposta: `{"ok": true}`. Erros: `parametro_invalido`, `fonte_inexistente`, `fonte_invalida` (não é um clone).
 
 ### `vertical.cena.ativar`
 Request: `{"nome": "Jogo"}`. Coloca a cena no canal 0 do canvas (corte seco). Erro: `cena_inexistente`.

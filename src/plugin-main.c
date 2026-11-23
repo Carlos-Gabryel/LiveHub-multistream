@@ -22,10 +22,11 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include "vendor/obs-websocket-api.h"
 #include "saidas.h"
 #include "vertical.h"
+#include "clone.h"
 #include "dock.hpp"
 
 #define LHMS_VENDOR_NAME "livehub-multistream"
-#define LHMS_API_VERSION 6
+#define LHMS_API_VERSION 7
 #define LHMS_WS_MIN_API 2 /* obs-websocket API version with vendor requests */
 #define LHMS_OBS_MIN_VERSION MAKE_SEMANTIC_VERSION(31, 1, 0)
 
@@ -202,6 +203,7 @@ bool obs_module_load(void)
 		return false;
 	}
 
+	clone_registrar();
 	saidas_init(emitir_evento);
 	lhms_ativo = true;
 	obs_log(LOG_INFO, "plugin loaded successfully (version %s)", PLUGIN_VERSION);

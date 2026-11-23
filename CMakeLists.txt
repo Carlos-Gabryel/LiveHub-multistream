@@ -34,7 +34,7 @@ if(ENABLE_QT)
   )
 endif()
 
-target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/saidas.c src/vertical.c src/dock.cpp src/vdocks.cpp src/selftest.cpp)
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE src/plugin-main.c src/saidas.c src/vertical.c src/clone.c src/dock.cpp src/vdocks.cpp src/selftest.cpp)
 
 file(GLOB LHMS_OBSPORT_SOURCES CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/obsport/*.cpp")
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE ${LHMS_OBSPORT_SOURCES})

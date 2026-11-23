@@ -58,6 +58,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <stdio.h>
 #include <math.h>
 #include "vertical.h"
+#include "clone.h"
 #include "saidas.h"
 
 #define NOME_CANVAS "LiveHub Vertical"
@@ -114,7 +115,7 @@ const char *const VERTICAL_REQUESTS[] = {
 	"vertical.cenas.renomear",   "vertical.cena.itens",     "vertical.item.adicionar", "vertical.item.transformar",
 	"vertical.item.visivel",     "vertical.item.ordem",     "vertical.item.remover",   "vertical.cena.ativar",
 	"vertical.ligacoes.definir", "vertical.ligacoes.listar", "vertical.cenas.duplicar", "vertical.cenas.mover",
-	"vertical.item.bloquear"};
+	"vertical.item.bloquear", "vertical.clone.criar", "vertical.clone.ajustar"};
 const size_t VERTICAL_REQUESTS_N = sizeof(VERTICAL_REQUESTS) / sizeof(VERTICAL_REQUESTS[0]);
 
 /* ---------- helpers ---------- */
@@ -821,6 +822,7 @@ void vertical_evento(enum obs_frontend_event event)
 		montar();
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGING:
+		clone_pendentes_liberar_todos();
 		desmontar(true);
 		/* The next collection brings its own data (load callback); never reuse the old one. */
 		pthread_mutex_lock(&s_vlock);
@@ -869,6 +871,7 @@ void vertical_liberar(void)
 	if (!s_vok)
 		return;
 	obs_frontend_remove_save_callback(cb_salvar, NULL);
+	clone_pendentes_liberar_todos();
 	desmontar(false);
 	s_vok = false;
 	obs_data_release(s_dados);
@@ -1268,6 +1271,8 @@ static bool h_item_adicionar(obs_data_t *rq, obs_data_t *rs)
 		return erro(rs, "limite_itens");
 	}
 	obs_sceneitem_t *item = obs_scene_add(sc, src);
+	if (item)
+		clone_pendente_liberar(src);
 	obs_source_release(src);
 	if (!item) {
 		liberar_cena(sc);
@@ -1511,6 +1516,32 @@ static bool h_lig_listar(obs_data_t *rq, obs_data_t *rs)
 	return false;
 }
 
+static bool h_clone_criar(obs_data_t *rq, obs_data_t *rs)
+{
+	if (!obs_data_has_user_value(rq, "nome") || !obs_data_has_user_value(rq, "fonte"))
+		return erro(rs, "parametro_invalido");
+	long long o = obs_data_has_user_value(rq, "opacidade") ? obs_data_get_int(rq, "opacidade") : 100;
+	if (o < 0 || o > 100)
+		return erro(rs, "parametro_invalido");
+	const char *e = clone_criar(obs_data_get_string(rq, "nome"), obs_data_get_string(rq, "fonte"), (int)o);
+	if (e)
+		return erro(rs, e);
+	return sucesso(rs, true);
+}
+
+static bool h_clone_ajustar(obs_data_t *rq, obs_data_t *rs)
+{
+	if (!obs_data_has_user_value(rq, "nome") || !obs_data_has_user_value(rq, "opacidade"))
+		return erro(rs, "parametro_invalido");
+	long long o = obs_data_get_int(rq, "opacidade");
+	if (o < 0 || o > 100)
+		return erro(rs, "parametro_invalido");
+	const char *e = clone_ajustar(obs_data_get_string(rq, "nome"), (int)o);
+	if (e)
+		return erro(rs, e);
+	return sucesso(rs, true);
+}
+
 struct req_def {
 	const char *nome;
 	bool (*fn)(obs_data_t *, obs_data_t *);
@@ -1535,6 +1566,8 @@ static const struct req_def REQS[] = {
 	{"vertical.cenas.duplicar", h_cenas_duplicar, true},
 	{"vertical.cenas.mover", h_cenas_mover, true},
 	{"vertical.item.bloquear", h_item_bloquear, true},
+	{"vertical.clone.criar", h_clone_criar, false},
+	{"vertical.clone.ajustar", h_clone_ajustar, false},
 };
 
 bool vertical_request(const char *nome, obs_data_t *request_data, obs_data_t *response_data)
