@@ -76,10 +76,13 @@ static obs_data_t *s_lig = NULL;   /* map: main scene name -> vertical scene nam
 static obs_data_t *s_dados = NULL; /* data stashed by the load callback, waiting for the canvas */
 static obs_data_t *s_snap = NULL;  /* snapshot taken when the canvas was torn down, for the pending save */
 static bool s_pronto = false;      /* FINISHED_LOADING seen, canvas may be created */
+static DARRAY(char *) s_ordem; /* scene names in user order (like the OBS Scenes dock); guarded by s_vlock */
 static volatile bool s_disp = false;
 static volatile long s_versao = 1;
 static void (*s_ui_cb)(void *) = NULL; /* UI hook, set/called on the UI thread only */
 static void *s_ui_dados = NULL;
+
+static void ordem_sync(obs_canvas_t *c);
 
 static void bump(void)
 {
@@ -90,7 +93,8 @@ const char *const VERTICAL_REQUESTS[] = {
 	"vertical.status",           "vertical.cenas.listar",   "vertical.cenas.criar",    "vertical.cenas.remover",
 	"vertical.cenas.renomear",   "vertical.cena.itens",     "vertical.item.adicionar", "vertical.item.transformar",
 	"vertical.item.visivel",     "vertical.item.ordem",     "vertical.item.remover",   "vertical.cena.ativar",
-	"vertical.ligacoes.definir", "vertical.ligacoes.listar"};
+	"vertical.ligacoes.definir", "vertical.ligacoes.listar", "vertical.cenas.duplicar", "vertical.cenas.mover",
+	"vertical.item.bloquear"};
 const size_t VERTICAL_REQUESTS_N = sizeof(VERTICAL_REQUESTS) / sizeof(VERTICAL_REQUESTS[0]);
 
 /* ---------- helpers ---------- */
@@ -188,10 +192,91 @@ static bool cb_primeira(void *p, obs_source_t *src)
 static void ativar_primeira(void)
 {
 	obs_source_t *src = NULL;
-	obs_canvas_enum_scenes(s_canvas, cb_primeira, &src);
+	ordem_sync(s_canvas);
+	if (s_ordem.num) {
+		obs_scene_t *sc = achar_cena(s_ordem.array[0]);
+		if (sc)
+			src = obs_scene_get_source(sc); /* keeps the lookup reference */
+	}
+	if (!src)
+		obs_canvas_enum_scenes(s_canvas, cb_primeira, &src);
 	obs_canvas_set_channel(s_canvas, 0, src);
 	if (src)
 		obs_source_release(src);
+}
+
+
+/* ---------- scene order ---------- */
+
+static bool cb_ordem_enum(void *p, obs_source_t *src)
+{
+	struct lista_chaves_t {
+		DARRAY(char *) a;
+	} *l = p;
+	char *n = bstrdup(obs_source_get_name(src));
+	da_push_back(l->a, &n);
+	return true;
+}
+
+static void ordem_limpar(void)
+{
+	for (size_t i = 0; i < s_ordem.num; i++)
+		bfree(s_ordem.array[i]);
+	da_free(s_ordem);
+	da_init(s_ordem);
+}
+
+/* Caller holds s_vlock (or owns `c`). Rebuilds s_ordem: known names keep their position, scenes that no longer
+ * exist are dropped, unknown scenes are appended in canvas enum order. */
+static void ordem_sync(obs_canvas_t *c)
+{
+	struct lista_chaves_t {
+		DARRAY(char *) a;
+	} existentes;
+	da_init(existentes.a);
+	obs_canvas_enum_scenes(c, cb_ordem_enum, &existentes);
+
+	DARRAY(char *) nova;
+	da_init(nova);
+	for (size_t i = 0; i < s_ordem.num; i++) {
+		bool achou = false, dup = false;
+		for (size_t j = 0; j < existentes.a.num && !achou; j++)
+			achou = strcmp(existentes.a.array[j], s_ordem.array[i]) == 0;
+		for (size_t j = 0; j < nova.num && !dup; j++)
+			dup = strcmp(nova.array[j], s_ordem.array[i]) == 0;
+		if (achou && !dup) {
+			char *n = bstrdup(s_ordem.array[i]);
+			da_push_back(nova, &n);
+		}
+	}
+	for (size_t j = 0; j < existentes.a.num; j++) {
+		bool ja = false;
+		for (size_t i = 0; i < nova.num && !ja; i++)
+			ja = strcmp(nova.array[i], existentes.a.array[j]) == 0;
+		if (!ja) {
+			char *n = bstrdup(existentes.a.array[j]);
+			da_push_back(nova, &n);
+		}
+	}
+	for (size_t j = 0; j < existentes.a.num; j++)
+		bfree(existentes.a.array[j]);
+	da_free(existentes.a);
+	ordem_limpar();
+	s_ordem.da = nova.da;
+}
+
+static void ordem_carregar(obs_data_t *dados)
+{
+	ordem_limpar();
+	obs_data_array_t *arr = dados ? obs_data_get_array(dados, "ordem") : NULL;
+	size_t n = arr ? obs_data_array_count(arr) : 0;
+	for (size_t i = 0; i < n; i++) {
+		obs_data_t *it = obs_data_array_item(arr, i);
+		char *nome = bstrdup(obs_data_get_string(it, "nome"));
+		da_push_back(s_ordem, &nome);
+		obs_data_release(it);
+	}
+	obs_data_array_release(arr);
 }
 
 /* ---------- serialization ---------- */
@@ -219,6 +304,16 @@ static obs_data_t *serializar(obs_canvas_t *c, obs_data_t *lig)
 	obs_data_set_array(d, "cenas", arr);
 	obs_data_array_release(arr);
 	obs_data_set_string(d, "ativa", ativa);
+	ordem_sync(c);
+	obs_data_array_t *ord = obs_data_array_create();
+	for (size_t i = 0; i < s_ordem.num; i++) {
+		obs_data_t *o = obs_data_create();
+		obs_data_set_string(o, "nome", s_ordem.array[i]);
+		obs_data_array_push_back(ord, o);
+		obs_data_release(o);
+	}
+	obs_data_set_array(d, "ordem", ord);
+	obs_data_array_release(ord);
 	if (lig)
 		obs_data_set_obj(d, "ligacoes", lig);
 	return d;
@@ -342,6 +437,7 @@ static void montar(void)
 
 		obs_data_release(s_lig);
 		s_lig = obs_data_get_obj(s_dados, "ligacoes");
+		ordem_carregar(s_dados);
 
 		obs_scene_t *sc = achar_cena(obs_data_get_string(s_dados, "ativa"));
 		if (sc) {
@@ -353,6 +449,7 @@ static void montar(void)
 	}
 	if (!s_lig)
 		s_lig = obs_data_create();
+	ordem_sync(c);
 	obs_data_release(s_dados);
 	s_dados = NULL;
 	obs_data_release(s_snap);
@@ -404,6 +501,7 @@ static void desmontar(bool guardar)
 		obs_data_release(s_snap);
 		s_snap = serializar(c, s_lig);
 	}
+	ordem_limpar();
 	obs_data_t *lig = s_lig;
 	s_lig = NULL;
 	bump();
@@ -623,28 +721,36 @@ static bool h_cenas_listar(obs_data_t *rq, obs_data_t *rs)
 {
 	UNUSED_PARAMETER(rq);
 	obs_data_array_t *arr = obs_data_array_create();
-	obs_canvas_enum_scenes(s_canvas, cb_listar, arr);
+	ordem_sync(s_canvas);
+	for (size_t i = 0; i < s_ordem.num; i++) {
+		obs_scene_t *sc = achar_cena(s_ordem.array[i]);
+		if (sc) {
+			cb_listar(arr, obs_scene_get_source(sc));
+			liberar_cena(sc);
+		}
+	}
 	obs_data_set_bool(rs, "ok", true);
 	obs_data_set_array(rs, "cenas", arr);
 	obs_data_array_release(arr);
 	return false;
 }
 
-static bool h_cenas_criar(obs_data_t *rq, obs_data_t *rs)
+/* Creates a scene on the canvas (caller holds s_vlock). Returns NULL or a protocol error; *out is a referenced
+ * scene on success (release with liberar_cena). */
+static const char *criar_cena(const char *nome, obs_scene_t **out)
 {
-	const char *nome = obs_data_get_string(rq, "nome");
 	if (!nome_valido(nome))
-		return erro(rs, "nome_invalido");
+		return "nome_invalido";
 	obs_scene_t *ex = achar_cena(nome);
 	if (ex) {
 		liberar_cena(ex);
-		return erro(rs, "nome_em_uso");
+		return "nome_em_uso";
 	}
 	if (contar_cenas() >= MAX_CENAS)
-		return erro(rs, "limite_cenas");
+		return "limite_cenas";
 	obs_scene_t *sc = obs_canvas_scene_create(s_canvas, nome);
 	if (!sc)
-		return erro(rs, "outro");
+		return "outro";
 	obs_source_release(obs_scene_get_source(sc)); /* the canvas (SCENE_REF) keeps the scene alive */
 	obs_source_t *atual = obs_canvas_get_channel(s_canvas, 0);
 	if (!atual) {
@@ -655,7 +761,94 @@ static bool h_cenas_criar(obs_data_t *rq, obs_data_t *rs)
 		}
 	}
 	obs_source_release(atual);
+	ordem_sync(s_canvas);
+	*out = achar_cena(nome);
+	return *out ? NULL : "outro";
+}
+
+static bool h_cenas_criar(obs_data_t *rq, obs_data_t *rs)
+{
+	obs_scene_t *sc = NULL;
+	const char *e = criar_cena(obs_data_get_string(rq, "nome"), &sc);
+	if (e)
+		return erro(rs, e);
+	liberar_cena(sc);
 	return sucesso(rs, true);
+}
+
+struct ctx_dup {
+	obs_scene_t *destino;
+};
+
+/* Adapted from OBS Studio (obs_scene_duplicate, OBS_SCENE_DUP_REFS): same sources referenced, item settings
+ * copied. */
+static bool cb_duplicar(obs_scene_t *sc, obs_sceneitem_t *item, void *p)
+{
+	UNUSED_PARAMETER(sc);
+	struct ctx_dup *c = p;
+	obs_sceneitem_t *novo = obs_scene_add(c->destino, obs_sceneitem_get_source(item));
+	if (!novo)
+		return true;
+	struct obs_transform_info ti;
+	struct obs_sceneitem_crop crop;
+	obs_sceneitem_defer_update_begin(novo);
+	obs_sceneitem_get_info2(item, &ti);
+	obs_sceneitem_set_info2(novo, &ti);
+	obs_sceneitem_get_crop(item, &crop);
+	obs_sceneitem_set_crop(novo, &crop);
+	obs_sceneitem_set_scale_filter(novo, obs_sceneitem_get_scale_filter(item));
+	obs_sceneitem_set_blending_method(novo, obs_sceneitem_get_blending_method(item));
+	obs_sceneitem_set_blending_mode(novo, obs_sceneitem_get_blending_mode(item));
+	obs_sceneitem_defer_update_end(novo);
+	obs_sceneitem_set_visible(novo, obs_sceneitem_visible(item));
+	obs_sceneitem_set_locked(novo, obs_sceneitem_locked(item));
+	return true;
+}
+
+static bool h_cenas_duplicar(obs_data_t *rq, obs_data_t *rs)
+{
+	obs_scene_t *orig = achar_cena(obs_data_get_string(rq, "nome"));
+	if (!orig)
+		return erro(rs, "cena_inexistente");
+	obs_scene_t *novo = NULL;
+	const char *e = criar_cena(obs_data_get_string(rq, "novo"), &novo);
+	if (e) {
+		liberar_cena(orig);
+		return erro(rs, e);
+	}
+	struct ctx_dup c = {novo};
+	obs_scene_enum_items(orig, cb_duplicar, &c);
+	liberar_cena(novo);
+	liberar_cena(orig);
+	return sucesso(rs, true);
+}
+
+static bool h_cenas_mover(obs_data_t *rq, obs_data_t *rs)
+{
+	const char *nome = obs_data_get_string(rq, "nome");
+	if (!obs_data_has_user_value(rq, "posicao"))
+		return erro(rs, "parametro_invalido");
+	obs_scene_t *sc = achar_cena(nome);
+	if (!sc)
+		return erro(rs, "cena_inexistente");
+	liberar_cena(sc);
+	ordem_sync(s_canvas);
+	size_t atual = s_ordem.num;
+	for (size_t i = 0; i < s_ordem.num; i++)
+		if (strcmp(s_ordem.array[i], nome) == 0)
+			atual = i;
+	if (atual == s_ordem.num)
+		return erro(rs, "cena_inexistente");
+	long long pos = obs_data_get_int(rq, "posicao");
+	if (pos < 0)
+		pos = 0;
+	if (pos > (long long)s_ordem.num - 1)
+		pos = (long long)s_ordem.num - 1;
+	char *n = s_ordem.array[atual];
+	da_erase(s_ordem, atual);
+	da_insert(s_ordem, (size_t)pos, &n);
+	obs_data_set_int(rs, "posicao", pos);
+	return sucesso(rs, (size_t)pos != atual);
 }
 
 /* Names of the links whose value is `vnome` (caller frees with free_chaves). */
@@ -729,6 +922,12 @@ static bool h_cenas_renomear(obs_data_t *rq, obs_data_t *rs)
 		return erro(rs, "nome_em_uso");
 	}
 	obs_source_set_name(src, novo);
+	for (size_t i = 0; i < s_ordem.num; i++) {
+		if (strcmp(s_ordem.array[i], antigo) == 0) {
+			bfree(s_ordem.array[i]);
+			s_ordem.array[i] = bstrdup(novo);
+		}
+	}
 
 	/* Keep the links pointing at the renamed scene. */
 	struct lista_chaves chaves;
@@ -922,6 +1121,22 @@ static bool h_item_visivel(obs_data_t *rq, obs_data_t *rs)
 	return sucesso(rs, true);
 }
 
+static bool h_item_bloquear(obs_data_t *rq, obs_data_t *rs)
+{
+	obs_scene_t *sc;
+	obs_sceneitem_t *item;
+	const char *e = achar_item(rq, &sc, &item);
+	if (e)
+		return erro(rs, e);
+	if (!obs_data_has_user_value(rq, "bloqueado")) {
+		liberar_cena(sc);
+		return erro(rs, "parametro_invalido");
+	}
+	obs_sceneitem_set_locked(item, obs_data_get_bool(rq, "bloqueado"));
+	liberar_cena(sc);
+	return sucesso(rs, true);
+}
+
 static bool h_item_ordem(obs_data_t *rq, obs_data_t *rs)
 {
 	obs_scene_t *sc;
@@ -1026,6 +1241,9 @@ static const struct req_def REQS[] = {
 	{"vertical.cena.ativar", h_cena_ativar, true},
 	{"vertical.ligacoes.definir", h_lig_definir, true},
 	{"vertical.ligacoes.listar", h_lig_listar, true},
+	{"vertical.cenas.duplicar", h_cenas_duplicar, true},
+	{"vertical.cenas.mover", h_cenas_mover, true},
+	{"vertical.item.bloquear", h_item_bloquear, true},
 };
 
 bool vertical_request(const char *nome, obs_data_t *request_data, obs_data_t *response_data)
@@ -1118,7 +1336,14 @@ size_t vertical_cenas_listar(struct vertical_cena *out, size_t max)
 	pthread_mutex_lock(&s_vlock);
 	if (s_canvas) {
 		c.ativa = obs_canvas_get_channel(s_canvas, 0);
-		obs_canvas_enum_scenes(s_canvas, cb_cenas_ui, &c);
+		ordem_sync(s_canvas);
+		for (size_t i = 0; i < s_ordem.num; i++) {
+			obs_scene_t *sc = achar_cena(s_ordem.array[i]);
+			if (sc) {
+				cb_cenas_ui(&c, obs_scene_get_source(sc));
+				liberar_cena(sc);
+			}
+		}
 		obs_source_release(c.ativa);
 	}
 	pthread_mutex_unlock(&s_vlock);
@@ -1171,6 +1396,22 @@ const char *vertical_cena_ativar(const char *nome)
 	obs_data_t *rq = obs_data_create();
 	obs_data_set_string(rq, "nome", nome ? nome : "");
 	return req_ui("vertical.cena.ativar", rq, NULL);
+}
+
+const char *vertical_cena_duplicar(const char *nome, const char *novo)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "nome", nome ? nome : "");
+	obs_data_set_string(rq, "novo", novo ? novo : "");
+	return req_ui("vertical.cenas.duplicar", rq, NULL);
+}
+
+const char *vertical_cena_mover(const char *nome, int posicao)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "nome", nome ? nome : "");
+	obs_data_set_int(rq, "posicao", posicao);
+	return req_ui("vertical.cenas.mover", rq, NULL);
 }
 
 void vertical_ligacao_obter(const char *vnome, char *dst, size_t n)
@@ -1312,6 +1553,34 @@ const char *vertical_item_visivel(const char *cena, int64_t id, bool visivel)
 	obs_data_t *rq = rq_item(cena, id);
 	obs_data_set_bool(rq, "visivel", visivel);
 	return req_ui("vertical.item.visivel", rq, NULL);
+}
+
+const char *vertical_item_bloquear(const char *cena, int64_t id, bool bloqueado)
+{
+	obs_data_t *rq = rq_item(cena, id);
+	obs_data_set_bool(rq, "bloqueado", bloqueado);
+	return req_ui("vertical.item.bloquear", rq, NULL);
+}
+
+obs_sceneitem_t *vertical_item_ref(const char *cena, int64_t id)
+{
+	if (!s_vok)
+		return NULL;
+	obs_sceneitem_t *ref = NULL;
+	pthread_mutex_lock(&s_vlock);
+	if (s_canvas) {
+		obs_scene_t *sc = cena_ou_ativa(cena);
+		if (sc) {
+			obs_sceneitem_t *item = obs_scene_find_sceneitem_by_id(sc, id);
+			if (item) {
+				obs_sceneitem_addref(item);
+				ref = item;
+			}
+			liberar_cena(sc);
+		}
+	}
+	pthread_mutex_unlock(&s_vlock);
+	return ref;
 }
 
 const char *vertical_item_ordem(const char *cena, int64_t id, int posicao)

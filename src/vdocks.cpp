@@ -32,6 +32,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <obs-module.h>
 #include <obs-frontend-api.h>
 #include <graphics/matrix4.h>
+#include <graphics/math-defs.h>
 #include <graphics/vec2.h>
 #include <graphics/vec3.h>
 #include <plugin-support.h>
@@ -44,7 +45,14 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 
 #include <QAction>
 #include <QApplication>
-#include <QComboBox>
+#include <QCheckBox>
+#include <QDialog>
+#include <QDialogButtonBox>
+#include <QListWidget>
+#include <QMainWindow>
+#include <QRadioButton>
+#include <QStyledItemDelegate>
+#include <QToolBar>
 #include <QCursor>
 #include <QEvent>
 #include <QFrame>
@@ -63,7 +71,6 @@ with this program. If not, see <https://www.gnu.org/licenses/>
 #include <QPixmap>
 #include <QPlatformSurfaceEvent>
 #include <QPushButton>
-#include <QScrollArea>
 #include <QShowEvent>
 #include <QStringList>
 #include <QStyle>
@@ -95,44 +102,6 @@ namespace {
 
 std::atomic<int> s_em_andamento{0};
 std::atomic<bool> s_desligando{false};
-
-/* Same tokens as the Multistream dock ("PADRAO"), scoped under #lhvRoot so nothing leaks into OBS. */
-const char *ESTILO = R"(
-#lhvRoot { background:#0e0e13; color:#ececf1; font-family:"Segoe UI"; font-size:13px; }
-#lhvRoot QScrollArea, #lhvRoot QWidget#lhvConteudo { background:transparent; border:none; }
-#lhvRoot QLabel { background:transparent; color:#ececf1; font-size:13px; }
-#lhvRoot QLabel#h3 { color:#a6a6b8; font-size:11px; font-weight:600; letter-spacing:0.4px; }
-#lhvRoot QLabel#mut { color:#a6a6b8; font-size:12px; }
-#lhvRoot QLabel#mut11 { color:#a6a6b8; font-size:11px; }
-#lhvRoot QLabel#nome { font-size:12px; font-weight:700; }
-#lhvRoot QPushButton { min-height:22px; max-height:24px; padding:0 10px; border-radius:6px; border:1px solid #3a3a48;
-  background:#23232e; color:#ececf1; font-size:12px; font-weight:600; }
-#lhvRoot QPushButton:hover { background:#2d2d3a; }
-#lhvRoot QPushButton:disabled { background:#23232e; color:#77778a; }
-#lhvRoot QPushButton#mini { min-width:22px; max-width:24px; padding:0; font-size:11px; }
-#lhvRoot QPushButton#olho { min-width:24px; max-width:24px; padding:0; background:transparent; border:none; }
-#lhvRoot QPushButton#olho:hover { background:#2d2d3a; }
-#lhvRoot QPushButton[acao="iniciar"] { background:#9146ff; border-color:#9146ff; color:#ffffff; }
-#lhvRoot QPushButton[acao="iniciar"]:hover { background:#a35fff; border-color:#a35fff; }
-#lhvRoot QPushButton[acao="parar"] { background:#6b2431; border-color:#6b2431; color:#ffffff; }
-#lhvRoot QPushButton[acao="parar"]:hover { background:#822c3b; border-color:#822c3b; }
-#lhvRoot QPushButton[acao]:disabled { background:#3b2a4f; border-color:#3b2a4f; color:#a9a0b8; }
-#lhvRoot QComboBox { min-height:20px; max-height:22px; max-width:140px; padding:0 6px; border-radius:6px;
-  border:1px solid #3a3a48; background:#23232e; color:#ececf1; font-size:11px; }
-#lhvRoot QComboBox:hover { background:#2d2d3a; }
-#lhvRoot QComboBox::drop-down { border:none; width:16px; }
-#lhvRoot QComboBox QAbstractItemView { background:#17171f; color:#ececf1; border:1px solid #2a2a36;
-  selection-background-color:#9146ff; selection-color:#ffffff; outline:none; }
-#lhvRoot QLineEdit { min-height:20px; max-height:22px; padding:0 6px; border-radius:6px; border:1px solid #9146ff;
-  background:#17171f; color:#ececf1; font-size:12px; }
-#lhvRoot QMenu { background:#17171f; color:#ececf1; border:1px solid #2a2a36; padding:4px; font-size:12px; }
-#lhvRoot QMenu::item { padding:4px 18px; border-radius:4px; }
-#lhvRoot QMenu::item:selected { background:#9146ff; color:#ffffff; }
-#lhvRoot QMenu::item:disabled { color:#77778a; }
-#lhvRoot QMenu::separator { height:1px; background:#2a2a36; margin:4px 6px; }
-#lhvRoot QDialog, #lhvRoot QMessageBox { background:#0e0e13; color:#ececf1; }
-#lhvRoot QToolTip { background:#17171f; color:#ececf1; border:1px solid #2a2a36; }
-)";
 
 QString T(const char *s)
 {
@@ -180,33 +149,6 @@ private:
 	}
 };
 
-QLabel *criarLabel(QWidget *pai, const char *nome, const QString &texto = QString())
-{
-	QLabel *l = new QLabel(texto, pai);
-	l->setObjectName(nome);
-	l->setTextFormat(Qt::PlainText);
-	return l;
-}
-
-QPushButton *criarMini(QWidget *pai, const QString &texto, const QString &dica)
-{
-	auto *b = new QPushButton(texto, pai);
-	b->setObjectName("mini");
-	b->setToolTip(dica.toHtmlEscaped());
-	b->setCursor(Qt::PointingHandCursor);
-	b->setFocusPolicy(Qt::NoFocus);
-	return b;
-}
-
-void setAcao(QPushButton *b, const char *acao)
-{
-	if (b->property("acao").toString() == acao)
-		return;
-	b->setProperty("acao", acao);
-	b->style()->unpolish(b);
-	b->style()->polish(b);
-}
-
 QString mensagemErro(const char *e)
 {
 	QString s = QString::fromUtf8(e);
@@ -225,22 +167,20 @@ QString mensagemErro(const char *e)
 	return T("Não foi possível concluir (%1).").arg(s);
 }
 
-/* Small styled confirmation; the dialog is a child of `pai`, so it inherits the scoped stylesheet. */
-bool confirmar(QWidget *pai, const QString &titulo, const QString &texto, const QString &acao)
-{
-	QMessageBox box(QMessageBox::Question, titulo, texto, QMessageBox::NoButton, pai);
-	box.setTextFormat(Qt::PlainText);
-	QPushButton *ok = box.addButton(acao, QMessageBox::DestructiveRole);
-	box.addButton(T("Cancelar"), QMessageBox::RejectRole);
-	box.exec();
-	return box.clickedButton() == ok;
-}
+QString OT(const char *chave);
 
 void aviso(QWidget *pai, const char *erro)
 {
+	if (strcmp(erro, "nome_em_uso") == 0) {
+		QMessageBox box(QMessageBox::Warning, OT("NameExists.Title"), OT("NameExists.Text"), QMessageBox::Ok,
+				pai);
+		box.setTextFormat(Qt::PlainText);
+		box.exec();
+		return;
+	}
 	QMessageBox box(QMessageBox::Warning, T("LiveHub Vertical"), mensagemErro(erro), QMessageBox::NoButton, pai);
 	box.setTextFormat(Qt::PlainText);
-	box.addButton(T("OK"), QMessageBox::AcceptRole);
+	box.addButton(OT("OK"), QMessageBox::AcceptRole);
 	box.exec();
 }
 
@@ -285,35 +225,794 @@ Hub &hub()
 	return h;
 }
 
-/* Raiz com estilo e tolerancia a dock estreito. */
+/* Plain root widget: no stylesheet, the OBS theme applies. */
 class Raiz : public QWidget {
 public:
 	explicit Raiz(QWidget *pai = nullptr) : QWidget(pai)
 	{
 		setObjectName("lhvRoot");
-		setAttribute(Qt::WA_StyledBackground, true);
-		setMinimumWidth(200);
-		setStyleSheet(ESTILO);
+		setMinimumWidth(150);
 	}
 };
 
-/* Thin row: neutral by default, colored side bar when active (green) or selected (accent). */
-void estiloLinha(QFrame *f, const char *barra)
+/* ------------------------------------------------------------------------------------------------------------ */
+/* OBS look-alike helpers: strings, icons, dialogs, menus. Behavior adapted from OBS Studio (frontend/widgets/    */
+/* OBSBasic_SceneItems.cpp, OBSBasic_Scenes.cpp, dialogs/OBSBasicSourceSelect.cpp).                              */
+/* ------------------------------------------------------------------------------------------------------------ */
+
+/* OBS's own translated string (the key itself when missing). */
+QString OT(const char *chave)
 {
-	f->setStyleSheet(QString("QFrame#linha{background:#1d1d27;border:none;border-left:3px solid %1;"
-				 "border-radius:6px;}")
-				 .arg(barra));
+	return QString::fromUtf8(obs_frontend_get_locale_string(chave));
 }
 
-void limparLayout(QVBoxLayout *l)
+QString semReticencias(QString s)
 {
-	while (QLayoutItem *it = l->takeAt(0)) {
-		if (QWidget *w = it->widget()) {
-			w->hide();
-			w->deleteLater();
-		}
-		delete it;
+	if (s.endsWith("..."))
+		s.chop(3);
+	return s;
+}
+
+QString escapar(const QString &s)
+{
+	return QString(s).replace("&", "&&");
+}
+
+std::vector<std::string> cenasPrincipais()
+{
+	std::vector<std::string> r;
+	struct obs_frontend_source_list lista = {};
+	obs_frontend_get_scenes(&lista);
+	for (size_t i = 0; i < lista.sources.num; i++)
+		r.push_back(obs_source_get_name(lista.sources.array[i]));
+	obs_frontend_source_list_free(&lista);
+	return r;
+}
+
+/* Theme icons are Q_PROPERTYs of OBSBasic (qproperty-*Icon in the theme). */
+QIcon iconeProp(const char *prop)
+{
+	auto *mw = static_cast<QMainWindow *>(obs_frontend_get_main_window());
+	if (!mw)
+		return QIcon();
+	return mw->property(prop).value<QIcon>();
+}
+
+/* Adapted from OBSBasic::GetSourceIcon. */
+QIcon iconeFonte(const char *id)
+{
+	if (strcmp(id, "scene") == 0)
+		return iconeProp("sceneIcon");
+	if (strcmp(id, "group") == 0)
+		return iconeProp("groupIcon");
+	switch (obs_source_get_icon_type(id)) {
+	case OBS_ICON_TYPE_IMAGE:
+		return iconeProp("imageIcon");
+	case OBS_ICON_TYPE_COLOR:
+		return iconeProp("colorIcon");
+	case OBS_ICON_TYPE_SLIDESHOW:
+		return iconeProp("slideshowIcon");
+	case OBS_ICON_TYPE_AUDIO_INPUT:
+		return iconeProp("audioInputIcon");
+	case OBS_ICON_TYPE_AUDIO_OUTPUT:
+		return iconeProp("audioOutputIcon");
+	case OBS_ICON_TYPE_DESKTOP_CAPTURE:
+		return iconeProp("desktopCapIcon");
+	case OBS_ICON_TYPE_WINDOW_CAPTURE:
+		return iconeProp("windowCapIcon");
+	case OBS_ICON_TYPE_GAME_CAPTURE:
+		return iconeProp("gameCapIcon");
+	case OBS_ICON_TYPE_CAMERA:
+		return iconeProp("cameraIcon");
+	case OBS_ICON_TYPE_TEXT:
+		return iconeProp("textIcon");
+	case OBS_ICON_TYPE_MEDIA:
+		return iconeProp("mediaIcon");
+	case OBS_ICON_TYPE_BROWSER:
+		return iconeProp("browserIcon");
+	case OBS_ICON_TYPE_PROCESS_AUDIO_OUTPUT:
+		return iconeProp("audioProcessOutputIcon");
+	default:
+		return iconeProp("defaultIcon");
 	}
+}
+
+void definirClasse(QWidget *w, const char *classe)
+{
+	w->setProperty("class", classe);
+	w->style()->unpolish(w);
+	w->style()->polish(w);
+}
+
+/* QToolBar like the OBS scenes/sources toolbars (16px icons, theme icons through the "class" property). */
+QToolBar *criarBarra(QWidget *pai)
+{
+	auto *b = new QToolBar(pai);
+	b->setIconSize(QSize(16, 16));
+	b->setFloatable(false);
+	return b;
+}
+
+QAction *acaoBarra(QToolBar *b, const char *classe, const QString &texto, const QString &dica)
+{
+	QAction *a = b->addAction(texto);
+	a->setToolTip(dica);
+	a->setProperty("class", classe);
+	if (QWidget *w = b->widgetForAction(a))
+		definirClasse(w, classe);
+	return a;
+}
+
+void infoBox(QWidget *pai, const QString &titulo, const QString &texto, QMessageBox::Icon icone = QMessageBox::Warning)
+{
+	QMessageBox box(icone, titulo, texto, QMessageBox::Ok, pai);
+	box.setTextFormat(Qt::PlainText);
+	box.exec();
+}
+
+/* Adapted from OBSBasic::QueryRemoveSource. */
+bool confirmarRemocao(QWidget *pai, const QString &nome)
+{
+	QMessageBox box(pai);
+	box.setText(OT("ConfirmRemove.Text").arg(nome));
+	box.setTextFormat(Qt::PlainText);
+	QPushButton *sim = box.addButton(OT("Yes"), QMessageBox::YesRole);
+	box.setDefaultButton(sim);
+	box.addButton(OT("No"), QMessageBox::NoRole);
+	box.setIcon(QMessageBox::Question);
+	box.setWindowTitle(OT("ConfirmRemove.Title"));
+	box.exec();
+	return box.clickedButton() == sim;
+}
+
+/* Asks for a name like OBS (NameDialog + NoNameEntered / NameExists loop). `existe` tells if a name is taken. */
+bool pedirNome(QWidget *pai, const QString &titulo, const QString &texto, const QString &padrao,
+	       const std::function<bool(const QString &)> &existe, QString &saida)
+{
+	for (;;) {
+		bool ok = false;
+		QString nome = QInputDialog::getText(pai, titulo, texto, QLineEdit::Normal, padrao, &ok);
+		if (!ok)
+			return false;
+		nome = nome.trimmed();
+		if (nome.isEmpty()) {
+			infoBox(pai, OT("NoNameEntered.Title"), OT("NoNameEntered.Text"));
+			continue;
+		}
+		if (existe(nome)) {
+			infoBox(pai, OT("NameExists.Title"), OT("NameExists.Text"));
+			continue;
+		}
+		saida = nome;
+		return true;
+	}
+}
+
+/* ---- sources ---- */
+
+bool acharItem(const std::string &cena, int64_t id, vertical_item &out)
+{
+	std::vector<vertical_item> v(MAX_ITENS_UI);
+	const size_t n = vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
+	for (size_t i = 0; i < n; i++) {
+		if (v[i].id == id) {
+			out = v[i];
+			return true;
+		}
+	}
+	return false;
+}
+
+/* Runs f(source) with a referenced source looked up by name. */
+template<typename F> void comFonte(const std::string &nome, F f)
+{
+	obs_source_t *s = obs_get_source_by_name(nome.c_str());
+	if (!s)
+		return;
+	f(s);
+	obs_source_release(s);
+}
+
+/* Adapted from ExitEditModeInternal (SourceTreeItem.cpp). Returns true when renamed. */
+bool renomearFonte(QWidget *pai, const QString &antigo, const QString &novo)
+{
+	if (novo.isEmpty()) {
+		infoBox(pai, OT("NoNameEntered.Title"), OT("NoNameEntered.Text"), QMessageBox::Information);
+		return false;
+	}
+	if (novo == antigo)
+		return false;
+	obs_source_t *ex = obs_get_source_by_name(novo.toUtf8().constData());
+	if (ex) {
+		obs_source_release(ex);
+		infoBox(pai, OT("NameExists.Title"), OT("NameExists.Text"), QMessageBox::Information);
+		return false;
+	}
+	bool ok = false;
+	comFonte(antigo.toUtf8().constData(), [&](obs_source_t *s) {
+		obs_source_set_name(s, novo.toUtf8().constData());
+		ok = true;
+	});
+	if (ok)
+		vertical_alteracao_concluida();
+	return ok;
+}
+
+void renomearFonteDialogo(QWidget *pai, const QString &antigo)
+{
+	bool ok = false;
+	QString novo = QInputDialog::getText(pai, semReticencias(OT("Rename")), OT("Basic.Main.Source"),
+					     QLineEdit::Normal, antigo, &ok);
+	if (ok)
+		renomearFonte(pai, antigo, novo.trimmed());
+}
+
+void removerFonte(QWidget *pai, const std::string &cena, int64_t id)
+{
+	vertical_item it;
+	if (!acharItem(cena, id, it))
+		return;
+	if (!confirmarRemocao(pai, QString::fromUtf8(it.nome)))
+		return;
+	if (!acharItem(cena, id, it)) /* it may have vanished while the dialog was open */
+		return;
+	if (const char *e = vertical_item_remover(cena.c_str(), id))
+		aviso(pai, e);
+	hub().selecionar(0);
+}
+
+enum class Ordem { Subir, Descer, Topo, Base };
+
+void moverItem(const std::string &cena, int64_t id, Ordem modo)
+{
+	std::vector<vertical_item> v(MAX_ITENS_UI);
+	const size_t n = vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
+	int atual = -1;
+	for (size_t i = 0; i < n; i++)
+		if (v[i].id == id)
+			atual = v[i].ordem;
+	if (atual < 0)
+		return;
+	int pos = atual;
+	switch (modo) {
+	case Ordem::Subir:
+		pos = atual + 1;
+		break;
+	case Ordem::Descer:
+		pos = atual - 1;
+		break;
+	case Ordem::Topo:
+		pos = int(n) - 1;
+		break;
+	case Ordem::Base:
+		pos = 0;
+		break;
+	}
+	pos = std::max(0, std::min(pos, int(n) - 1));
+	if (pos != atual)
+		vertical_item_ordem(cena.c_str(), id, pos);
+}
+
+/* ---- transform (adapted from OBSBasic_SceneItems.cpp; the canvas is VERTICAL_LARGURA x VERTICAL_ALTURA) ---- */
+
+struct CopiaTransformacao {
+	bool tem = false;
+	obs_transform_info ti = {};
+	obs_sceneitem_crop crop = {};
+};
+CopiaTransformacao s_copiaTransf;
+
+void caixaItem(obs_sceneitem_t *item, vec3 &tl, vec3 &br)
+{
+	matrix4 m;
+	obs_sceneitem_get_box_transform(item, &m);
+	vec3_set(&tl, M_INFINITE, M_INFINITE, 0.0f);
+	vec3_set(&br, -M_INFINITE, -M_INFINITE, 0.0f);
+	auto ponto = [&](float x, float y) {
+		vec3 p;
+		vec3_set(&p, x, y, 0.0f);
+		vec3_transform(&p, &p, &m);
+		vec3_min(&tl, &tl, &p);
+		vec3_max(&br, &br, &p);
+	};
+	ponto(0.0f, 0.0f);
+	ponto(1.0f, 0.0f);
+	ponto(0.0f, 1.0f);
+	ponto(1.0f, 1.0f);
+}
+
+vec3 tlItem(obs_sceneitem_t *item)
+{
+	vec3 tl, br;
+	caixaItem(item, tl, br);
+	return tl;
+}
+
+void definirTlItem(obs_sceneitem_t *item, const vec3 &tl)
+{
+	vec2 pos;
+	obs_sceneitem_get_pos(item, &pos);
+	const vec3 novo = tlItem(item);
+	pos.x += tl.x - novo.x;
+	pos.y += tl.y - novo.y;
+	obs_sceneitem_set_pos(item, &pos);
+}
+
+/* Runs f on the (unlocked) item, then saves like the end of a mouse edit. */
+void transformarItem(const std::string &cena, int64_t id, const std::function<void(obs_sceneitem_t *)> &f,
+		     bool ignorarBloqueio = false)
+{
+	obs_sceneitem_t *it = vertical_item_ref(cena.c_str(), id);
+	if (!it)
+		return;
+	if (ignorarBloqueio || !obs_sceneitem_locked(it)) {
+		f(it);
+		vertical_alteracao_concluida();
+	}
+	obs_sceneitem_release(it);
+}
+
+void girarItem(const std::string &cena, int64_t id, float graus)
+{
+	transformarItem(cena, id, [graus](obs_sceneitem_t *item) {
+		vec3 tl = tlItem(item);
+		float rot = graus + obs_sceneitem_get_rot(item);
+		if (rot >= 360.0f)
+			rot -= 360.0f;
+		else if (rot <= -360.0f)
+			rot += 360.0f;
+		obs_sceneitem_set_rot(item, rot);
+		obs_sceneitem_force_update_transform(item);
+		definirTlItem(item, tl);
+	});
+}
+
+void espelharItem(const std::string &cena, int64_t id, float mx, float my)
+{
+	transformarItem(cena, id, [mx, my](obs_sceneitem_t *item) {
+		vec3 tl = tlItem(item);
+		vec2 mul, scale;
+		vec2_set(&mul, mx, my);
+		obs_sceneitem_get_scale(item, &scale);
+		vec2_mul(&scale, &scale, &mul);
+		obs_sceneitem_set_scale(item, &scale);
+		obs_sceneitem_force_update_transform(item);
+		definirTlItem(item, tl);
+	});
+}
+
+void resetarItem(const std::string &cena, int64_t id)
+{
+	transformarItem(cena, id, [](obs_sceneitem_t *item) {
+		obs_sceneitem_defer_update_begin(item);
+		obs_transform_info info;
+		vec2_set(&info.pos, 0.0f, 0.0f);
+		vec2_set(&info.scale, 1.0f, 1.0f);
+		info.rot = 0.0f;
+		info.alignment = OBS_ALIGN_TOP | OBS_ALIGN_LEFT;
+		info.bounds_type = OBS_BOUNDS_NONE;
+		info.bounds_alignment = OBS_ALIGN_CENTER;
+		info.crop_to_bounds = false;
+		vec2_set(&info.bounds, 0.0f, 0.0f);
+		obs_sceneitem_set_info2(item, &info);
+		obs_sceneitem_crop crop = {};
+		obs_sceneitem_set_crop(item, &crop);
+		obs_sceneitem_defer_update_end(item);
+	});
+}
+
+void ajustarItem(const std::string &cena, int64_t id, obs_bounds_type tipo)
+{
+	transformarItem(cena, id, [tipo](obs_sceneitem_t *item) {
+		obs_transform_info info;
+		vec2_set(&info.pos, 0.0f, 0.0f);
+		vec2_set(&info.scale, 1.0f, 1.0f);
+		info.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
+		info.rot = 0.0f;
+		vec2_set(&info.bounds, float(VERTICAL_LARGURA), float(VERTICAL_ALTURA));
+		info.bounds_type = tipo;
+		info.bounds_alignment = OBS_ALIGN_CENTER;
+		info.crop_to_bounds = obs_sceneitem_get_bounds_crop(item);
+		obs_sceneitem_set_info2(item, &info);
+	});
+}
+
+enum class Centro { Cena, Vertical, Horizontal };
+
+void centrarItem(const std::string &cena, int64_t id, Centro tipo)
+{
+	transformarItem(cena, id, [tipo](obs_sceneitem_t *item) {
+		obs_transform_info oti;
+		obs_sceneitem_get_info2(item, &oti);
+		obs_source_t *src = obs_sceneitem_get_source(item);
+		if (float(obs_source_get_width(src)) * oti.scale.x == 0.0f ||
+		    float(obs_source_get_height(src)) * oti.scale.y == 0.0f)
+			return;
+		vec3 tl, br;
+		caixaItem(item, tl, br);
+		vec3 centro, tela, desl;
+		vec3_set(&centro, (br.x + tl.x) / 2.0f, (br.y + tl.y) / 2.0f, 0.0f);
+		vec3_set(&tela, float(VERTICAL_LARGURA) * 0.5f, float(VERTICAL_ALTURA) * 0.5f, 0.0f);
+		vec3_sub(&desl, &tela, &centro);
+		vec3_add(&tl, &tl, &desl);
+		const vec3 atual = tlItem(item);
+		if (tipo == Centro::Vertical)
+			tl.x = atual.x;
+		else if (tipo == Centro::Horizontal)
+			tl.y = atual.y;
+		definirTlItem(item, tl);
+	});
+}
+
+void copiarTransformacao(const std::string &cena, int64_t id)
+{
+	transformarItem(
+		cena, id,
+		[](obs_sceneitem_t *item) {
+			obs_sceneitem_get_info2(item, &s_copiaTransf.ti);
+			obs_sceneitem_get_crop(item, &s_copiaTransf.crop);
+			s_copiaTransf.tem = true;
+		},
+		true);
+}
+
+void colarTransformacao(const std::string &cena, int64_t id)
+{
+	if (!s_copiaTransf.tem)
+		return;
+	transformarItem(cena, id, [](obs_sceneitem_t *item) {
+		obs_sceneitem_defer_update_begin(item);
+		obs_sceneitem_set_info2(item, &s_copiaTransf.ti);
+		obs_sceneitem_set_crop(item, &s_copiaTransf.crop);
+		obs_sceneitem_defer_update_end(item);
+	});
+}
+
+/* ---- add source (OBSBasicSourceSelect) ---- */
+
+bool deveMostrarPropriedades(obs_source_t *s)
+{
+	if (!s || !obs_source_configurable(s))
+		return false;
+	return (obs_source_get_output_flags(s) & OBS_SOURCE_CAP_DONT_SHOW_PROPERTIES) == 0;
+}
+
+QString nomeExibicaoTipo(const char *tipo)
+{
+	if (strcmp(tipo, "scene") == 0)
+		return OT("Basic.Scene");
+	return QString::fromUtf8(obs_source_get_display_name(obs_get_latest_input_type_id(tipo)));
+}
+
+/* Replicates OBSBasicSourceSelect: create new / add existing + "make source visible". */
+class DialogoFonte : public QDialog {
+public:
+	DialogoFonte(QWidget *pai, const char *tipo) : QDialog(pai), tipo_(tipo)
+	{
+		setWindowFlags(windowFlags() & ~Qt::WindowContextHelpButtonHint);
+		setWindowTitle(OT("Basic.SourceSelect"));
+		resize(352, 314);
+
+		auto *v = new QVBoxLayout(this);
+		criar_ = new QRadioButton(OT("Basic.SourceSelect.CreateNew"), this);
+		criar_->setChecked(true);
+		nome_ = new QLineEdit(this);
+		existente_ = new QRadioButton(OT("Basic.SourceSelect.AddExisting"), this);
+		lista_ = new QListWidget(this);
+		lista_->setEnabled(false);
+		visivel_ = new QCheckBox(OT("Basic.SourceSelect.AddVisible"), this);
+		visivel_->setChecked(true);
+		botoes_ = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+		v->addWidget(criar_);
+		v->addWidget(nome_);
+		v->addWidget(existente_);
+		v->addWidget(lista_);
+		v->addWidget(visivel_);
+		v->addWidget(botoes_);
+
+		const QString base = nomeExibicaoTipo(tipo);
+		QString texto = base;
+		int i = 2;
+		for (;;) {
+			obs_source_t *s = obs_get_source_by_name(texto.toUtf8().constData());
+			if (!s)
+				break;
+			obs_source_release(s);
+			texto = QString("%1 %2").arg(base).arg(i++);
+		}
+		nome_->setText(texto);
+		nome_->setFocus();
+		nome_->selectAll();
+
+		if (strcmp(tipo, "scene") == 0) {
+			existente_->setChecked(true);
+			criar_->setChecked(false);
+			criar_->setEnabled(false);
+			nome_->setEnabled(false);
+			lista_->setEnabled(true);
+			for (const std::string &c : cenasPrincipais())
+				lista_->addItem(QString::fromUtf8(c.c_str()));
+			botoes_->button(QDialogButtonBox::Ok)->setEnabled(false);
+		} else {
+			obs_enum_sources(
+				[](void *p, obs_source_t *s) {
+					auto *self = static_cast<DialogoFonte *>(p);
+					if (obs_source_is_hidden(s))
+						return true;
+					if (strcmp(obs_source_get_unversioned_id(s), self->tipo_) == 0)
+						self->lista_->addItem(QString::fromUtf8(obs_source_get_name(s)));
+					return true;
+				},
+				this);
+		}
+		lista_->sortItems();
+
+		QObject::connect(criar_, &QRadioButton::toggled, nome_, &QLineEdit::setEnabled);
+		QObject::connect(existente_, &QRadioButton::toggled, lista_, &QListWidget::setEnabled);
+		QObject::connect(criar_, &QRadioButton::pressed, this, [this] {
+			botoes_->button(QDialogButtonBox::Ok)->setEnabled(true);
+		});
+		QObject::connect(existente_, &QRadioButton::pressed, this, [this] {
+			botoes_->button(QDialogButtonBox::Ok)->setEnabled(!lista_->selectedItems().isEmpty());
+		});
+		QObject::connect(lista_, &QListWidget::itemSelectionChanged, this, [this] {
+			botoes_->button(QDialogButtonBox::Ok)->setEnabled(true);
+		});
+		QObject::connect(botoes_, &QDialogButtonBox::accepted, this, &DialogoFonte::accept);
+		QObject::connect(botoes_, &QDialogButtonBox::rejected, this, &QDialog::reject);
+	}
+
+	bool usarExistente() const { return existente_->isChecked(); }
+	bool tornarVisivel() const { return visivel_->isChecked(); }
+	QString nomeNovo() const { return nome_->text(); }
+	QString nomeExistente() const
+	{
+		QListWidgetItem *i = lista_->currentItem();
+		return i ? i->text() : QString();
+	}
+
+	void accept() override
+	{
+		if (usarExistente()) {
+			if (!lista_->currentItem())
+				return;
+		} else {
+			if (nome_->text().isEmpty()) {
+				infoBox(this, OT("NoNameEntered.Title"), OT("NoNameEntered.Text"));
+				return;
+			}
+			obs_source_t *s = obs_get_source_by_name(nome_->text().toUtf8().constData());
+			if (s) {
+				obs_source_release(s);
+				infoBox(this, OT("NameExists.Title"), OT("NameExists.Text"), QMessageBox::Information);
+				return;
+			}
+		}
+		QDialog::accept();
+	}
+
+private:
+	const char *tipo_;
+	QRadioButton *criar_ = nullptr, *existente_ = nullptr;
+	QLineEdit *nome_ = nullptr;
+	QListWidget *lista_ = nullptr;
+	QCheckBox *visivel_ = nullptr;
+	QDialogButtonBox *botoes_ = nullptr;
+};
+
+/* Adapted from OBSBasic::AddSource + OBSBasicSourceSelect::on_buttonBox_accepted. `tipo` is an unversioned id. */
+void adicionarFonte(QWidget *pai, const std::string &tipoStd)
+{
+	const char *tipo = tipoStd.c_str();
+	DialogoFonte dlg(pai, tipo);
+	if (dlg.exec() != QDialog::Accepted)
+		return;
+	const std::string cena = ativaStd();
+	if (cena.empty())
+		return;
+	const bool visivel = dlg.tornarVisivel();
+	int64_t id = 0;
+
+	if (dlg.usarExistente()) {
+		const QByteArray nome = dlg.nomeExistente().toUtf8();
+		if (const char *e = vertical_item_adicionar(cena.c_str(), nome.constData(), &id)) {
+			aviso(pai, e);
+			return;
+		}
+		if (!visivel)
+			vertical_item_visivel(cena.c_str(), id, false);
+		hub().selecionar(id);
+		return;
+	}
+
+	const QByteArray nome = dlg.nomeNovo().toUtf8();
+	obs_source_t *src = obs_source_create(obs_get_latest_input_type_id(tipo), nome.constData(), nullptr, nullptr);
+	if (!src)
+		return;
+	if (const char *e = vertical_item_adicionar(cena.c_str(), nome.constData(), &id)) {
+		aviso(pai, e);
+		obs_source_release(src); /* nothing else references it: destroyed */
+		return;
+	}
+	/* set monitoring if the source monitors by default (as OBS does) */
+	if ((obs_source_get_output_flags(src) & OBS_SOURCE_MONITOR_BY_DEFAULT) != 0)
+		obs_source_set_monitoring_type(src, OBS_MONITORING_TYPE_MONITOR_ONLY);
+	if (!visivel)
+		vertical_item_visivel(cena.c_str(), id, false);
+	hub().selecionar(id);
+	if (deveMostrarPropriedades(src))
+		obs_frontend_open_source_properties(src);
+	obs_source_release(src);
+}
+
+/* Adapted from OBSBasic::CreateAddSourcePopupMenu (no groups; "Scene" lists the OBS scenes). */
+QMenu *criarMenuAdicionar(QWidget *pai, QMenu *parentMenu)
+{
+	QMenu *popup = new QMenu(OT("AddSource"), parentMenu);
+	QMenu *obsoletos = new QMenu(OT("Deprecated"), popup);
+	bool achouObsoletos = false;
+
+	auto acaoDepois = [](QMenu *menu, const QString &nome) -> QAction * {
+		for (QAction *a : menu->actions())
+			if (a->text().compare(nome, Qt::CaseInsensitive) >= 0)
+				return a;
+		return nullptr;
+	};
+	auto adicionar = [&](QMenu *m, const char *tipo, const QString &nome) {
+		QAction *a = new QAction(nome, m);
+		const std::string t = tipo;
+		QObject::connect(a, &QAction::triggered, pai, [pai, t] { adicionarFonte(pai, t); });
+		a->setIcon(iconeFonte(tipo));
+		m->insertAction(acaoDepois(m, nome), a);
+	};
+
+	const char *tipo = nullptr, *semVersao = nullptr;
+	size_t idx = 0;
+	while (obs_enum_input_types2(idx++, &tipo, &semVersao)) {
+		const uint32_t caps = obs_get_source_output_flags(tipo);
+		if ((caps & OBS_SOURCE_CAP_DISABLED) != 0)
+			continue;
+		const QString nome = QString::fromUtf8(obs_source_get_display_name(tipo));
+		if ((caps & OBS_SOURCE_DEPRECATED) == 0) {
+			adicionar(popup, semVersao, nome);
+		} else {
+			adicionar(obsoletos, semVersao, nome);
+			achouObsoletos = true;
+		}
+	}
+	adicionar(popup, "scene", OT("Basic.Scene"));
+
+	if (achouObsoletos) {
+		popup->addSeparator();
+		popup->addMenu(obsoletos);
+	} else {
+		delete obsoletos;
+	}
+	return popup;
+}
+
+void abrirMenuAdicionar(QWidget *pai, const QPoint &global)
+{
+	if (ativaStd().empty()) {
+		infoBox(pai, OT("Basic.Main.AddSourceHelp.Title"), OT("Basic.Main.AddSourceHelp.Text"),
+			QMessageBox::Information);
+		return;
+	}
+	QMenu raiz(pai);
+	QMenu *sub = criarMenuAdicionar(pai, &raiz);
+	sub->exec(global);
+}
+
+/* Adapted from OBSBasic::CreateSourcePopupMenu. Used by the Sources dock and by the preview right-click, so both
+ * menus are the same. `renomear` is the inline rename of the dock (null: a name dialog). */
+void menuFonte(QWidget *pai, const std::string &cena, int64_t id, const QPoint &global,
+	       const std::function<void()> &renomear)
+{
+	vertical_item item;
+	const bool tem = acharItem(cena, id, item);
+	QMenu menu(pai);
+
+	QMenu *adicionar = criarMenuAdicionar(pai, &menu);
+	menu.addMenu(adicionar);
+	menu.addSeparator();
+
+	if (tem) {
+		const std::string nomeFonte = item.nome;
+		uint32_t flags = 0;
+		bool configuravel = false;
+		comFonte(nomeFonte, [&](obs_source_t *s) {
+			flags = obs_source_get_output_flags(s);
+			configuravel = obs_source_configurable(s);
+		});
+		const bool video = (flags & OBS_SOURCE_VIDEO) != 0;
+
+		QMenu *ordem = menu.addMenu(OT("Basic.MainMenu.Edit.Order"));
+		QObject::connect(ordem->addAction(OT("Basic.MainMenu.Edit.Order.MoveUp")), &QAction::triggered, pai,
+				 [=] { moverItem(cena, id, Ordem::Subir); });
+		QObject::connect(ordem->addAction(OT("Basic.MainMenu.Edit.Order.MoveDown")), &QAction::triggered, pai,
+				 [=] { moverItem(cena, id, Ordem::Descer); });
+		ordem->addSeparator();
+		QObject::connect(ordem->addAction(OT("Basic.MainMenu.Edit.Order.MoveToTop")), &QAction::triggered, pai,
+				 [=] { moverItem(cena, id, Ordem::Topo); });
+		QObject::connect(ordem->addAction(OT("Basic.MainMenu.Edit.Order.MoveToBottom")), &QAction::triggered,
+				 pai, [=] { moverItem(cena, id, Ordem::Base); });
+
+		if (video) {
+			QMenu *tr = menu.addMenu(OT("Basic.MainMenu.Edit.Transform"));
+			auto acao = [&](const char *chave, std::function<void()> f) {
+				QAction *a = tr->addAction(OT(chave));
+				QObject::connect(a, &QAction::triggered, pai, std::move(f));
+				return a;
+			};
+			acao("Basic.MainMenu.Edit.Transform.EditTransform", [cena, id] {
+				obs_sceneitem_t *it = vertical_item_ref(cena.c_str(), id);
+				if (!it)
+					return;
+				obs_frontend_open_sceneitem_edit_transform(it);
+				obs_sceneitem_release(it);
+			});
+			acao("Basic.MainMenu.Edit.Transform.CopyTransform", [=] { copiarTransformacao(cena, id); });
+			acao("Basic.MainMenu.Edit.Transform.PasteTransform", [=] { colarTransformacao(cena, id); })
+				->setEnabled(s_copiaTransf.tem);
+			acao("Basic.MainMenu.Edit.Transform.ResetTransform", [=] { resetarItem(cena, id); });
+			tr->addSeparator();
+			acao("Basic.MainMenu.Edit.Transform.Rotate90CW", [=] { girarItem(cena, id, 90.0f); });
+			acao("Basic.MainMenu.Edit.Transform.Rotate90CCW", [=] { girarItem(cena, id, -90.0f); });
+			acao("Basic.MainMenu.Edit.Transform.Rotate180", [=] { girarItem(cena, id, 180.0f); });
+			tr->addSeparator();
+			acao("Basic.MainMenu.Edit.Transform.FlipHorizontal", [=] { espelharItem(cena, id, -1.0f, 1.0f); });
+			acao("Basic.MainMenu.Edit.Transform.FlipVertical", [=] { espelharItem(cena, id, 1.0f, -1.0f); });
+			tr->addSeparator();
+			acao("Basic.MainMenu.Edit.Transform.FitToScreen",
+			     [=] { ajustarItem(cena, id, OBS_BOUNDS_SCALE_INNER); });
+			acao("Basic.MainMenu.Edit.Transform.StretchToScreen",
+			     [=] { ajustarItem(cena, id, OBS_BOUNDS_STRETCH); });
+			acao("Basic.MainMenu.Edit.Transform.CenterToScreen", [=] { centrarItem(cena, id, Centro::Cena); });
+			acao("Basic.MainMenu.Edit.Transform.VerticalCenter",
+			     [=] { centrarItem(cena, id, Centro::Vertical); });
+			acao("Basic.MainMenu.Edit.Transform.HorizontalCenter",
+			     [=] { centrarItem(cena, id, Centro::Horizontal); });
+		}
+		menu.addSeparator();
+
+		QAction *rem = menu.addAction(OT("Remove"));
+		QObject::connect(rem, &QAction::triggered, pai, [pai, cena, id] {
+			QPointer<QWidget> p(pai);
+			QTimer::singleShot(0, pai, [p, cena, id] {
+				if (p)
+					removerFonte(p, cena, id);
+			});
+		});
+		QAction *ren = menu.addAction(semReticencias(OT("Rename")));
+		const QString nomeQ = QString::fromUtf8(item.nome);
+		QObject::connect(ren, &QAction::triggered, pai, [pai, renomear, nomeQ] {
+			QPointer<QWidget> p(pai);
+			QTimer::singleShot(0, pai, [p, renomear, nomeQ] {
+				if (!p)
+					return;
+				if (renomear)
+					renomear();
+				else
+					renomearFonteDialogo(p, nomeQ);
+			});
+		});
+		menu.addSeparator();
+
+		if (flags & OBS_SOURCE_INTERACTION) {
+			QObject::connect(menu.addAction(OT("Interact")), &QAction::triggered, pai, [nomeFonte] {
+				comFonte(nomeFonte, [](obs_source_t *s) { obs_frontend_open_source_interaction(s); });
+			});
+		}
+		QObject::connect(menu.addAction(OT("Filters")), &QAction::triggered, pai, [nomeFonte] {
+			comFonte(nomeFonte, [](obs_source_t *s) { obs_frontend_open_source_filters(s); });
+		});
+		QAction *props = menu.addAction(OT("Properties"));
+		QObject::connect(props, &QAction::triggered, pai, [nomeFonte] {
+			comFonte(nomeFonte, [](obs_source_t *s) { obs_frontend_open_source_properties(s); });
+		});
+		props->setEnabled(configuravel);
+	}
+	menu.exec(global);
 }
 
 /* ------------------------------------------------------------------------------------------------------------ */
@@ -691,7 +1390,13 @@ protected:
 			dy = float(step);
 			break;
 		case Qt::Key_Delete: {
-			removerItem(*sel);
+			const std::string cena = ativaStd();
+			const int64_t id = sel->id;
+			QPointer<Visor> self(this);
+			QTimer::singleShot(0, this, [self, cena, id] {
+				if (self)
+					removerFonte(self, cena, id);
+			});
 			return;
 		}
 		default:
@@ -723,7 +1428,6 @@ private:
 
 	std::vector<vertical_item> itens_; /* snapshot, bottom first */
 	std::string cenaEdicao_;
-	std::string cenaMenu_; /* scene the context menu was opened on */
 	Modo modo_ = Modo::Nenhum;
 	bool moveu_ = false;
 	vertical_item base_ = {};
@@ -1090,126 +1794,10 @@ private:
 		aplicar(ti, base_.crop);
 	}
 
-	/* ---- context menu actions ---- */
-
-	void aplicarPreset(const vertical_item &it,
-			   const std::function<void(obs_transform_info &, obs_sceneitem_crop &)> &f)
-	{
-		/* re-fetch by scene name + id: the scene/item may have changed while the menu was open */
-		const std::string cena = ativaStd();
-		if (cena != cenaMenu_)
-			return;
-		std::vector<vertical_item> v(MAX_ITENS_UI);
-		const size_t n = vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
-		const vertical_item *atual = nullptr;
-		for (size_t i = 0; i < n; i++)
-			if (v[i].id == it.id)
-				atual = &v[i];
-		if (!atual)
-			return;
-		base_ = *atual;
-		cenaEdicao_ = cena;
-		obs_transform_info ti = atual->ti;
-		obs_sceneitem_crop cr = atual->crop;
-		f(ti, cr);
-		aplicar(ti, cr);
-		vertical_alteracao_concluida();
-	}
-
+	/* Same menu as the Sources dock (OBS behavior). */
 	void menuContexto(const vertical_item &it, const QPoint &global)
 	{
-		const float W = float(VERTICAL_LARGURA), H = float(VERTICAL_ALTURA);
-		cenaMenu_ = ativaStd();
-		auto *menuPtr = new QMenu(this); /* popup() returns at once; the menu deletes itself on close */
-		menuPtr->setAttribute(Qt::WA_DeleteOnClose);
-		QMenu &menu = *menuPtr;
-		auto limites = [this](const vertical_item &i, vec3 &tl, vec3 &br) {
-			limitesTela(i.caixa, tl, br);
-		};
-		auto ajustar = [this, W, H](const vertical_item &i, obs_bounds_type tipo, bool cortar) {
-			aplicarPreset(i, [&](obs_transform_info &ti, obs_sceneitem_crop &) {
-				ti.pos.x = 0.0f;
-				ti.pos.y = 0.0f;
-				ti.rot = 0.0f;
-				ti.scale.x = ti.scale.y = 1.0f;
-				ti.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
-				ti.bounds_type = tipo;
-				ti.bounds_alignment = OBS_ALIGN_CENTER;
-				ti.bounds.x = W;
-				ti.bounds.y = H;
-				ti.crop_to_bounds = cortar;
-			});
-		};
-		auto centrar = [this, limites, W, H](const vertical_item &i, bool horizontal, bool vertical) {
-			aplicarPreset(i, [&](obs_transform_info &ti, obs_sceneitem_crop &) {
-				vec3 tl, br;
-				limites(i, tl, br);
-				if (horizontal)
-					ti.pos.x = std::round(ti.pos.x + (W / 2.0f - (tl.x + br.x) / 2.0f));
-				if (vertical)
-					ti.pos.y = std::round(ti.pos.y + (H / 2.0f - (tl.y + br.y) / 2.0f));
-			});
-		};
-		const vertical_item copia = it;
-		QAction *a;
-		a = menu.addAction(T("Preencher a tela (cortar)"));
-		QObject::connect(a, &QAction::triggered, this, [=] { ajustar(copia, OBS_BOUNDS_SCALE_OUTER, true); });
-		a = menu.addAction(T("Ajustar à tela"));
-		QObject::connect(a, &QAction::triggered, this, [=] { ajustar(copia, OBS_BOUNDS_SCALE_INNER, false); });
-		a = menu.addAction(T("Esticar"));
-		QObject::connect(a, &QAction::triggered, this, [=] { ajustar(copia, OBS_BOUNDS_STRETCH, false); });
-		menu.addSeparator();
-		a = menu.addAction(T("Centralizar"));
-		QObject::connect(a, &QAction::triggered, this, [=] { centrar(copia, true, true); });
-		a = menu.addAction(T("Centralizar na horizontal"));
-		QObject::connect(a, &QAction::triggered, this, [=] { centrar(copia, true, false); });
-		a = menu.addAction(T("Resetar transformação"));
-		QObject::connect(a, &QAction::triggered, this, [=] {
-			aplicarPreset(copia, [](obs_transform_info &ti, obs_sceneitem_crop &cr) {
-				ti.pos.x = ti.pos.y = 0.0f;
-				ti.rot = 0.0f;
-				ti.scale.x = ti.scale.y = 1.0f;
-				ti.alignment = OBS_ALIGN_LEFT | OBS_ALIGN_TOP;
-				ti.bounds_type = OBS_BOUNDS_NONE;
-				ti.bounds.x = ti.bounds.y = 0.0f;
-				ti.bounds_alignment = OBS_ALIGN_CENTER;
-				ti.crop_to_bounds = false;
-				cr = {};
-			});
-		});
-		menu.addSeparator();
-		a = menu.addAction(T("Remover"));
-		QObject::connect(a, &QAction::triggered, this, [this, copia] { removerItem(copia); });
-		menu.popup(global);
-	}
-
-	void removerItem(const vertical_item &it)
-	{
-		/* copies only: the confirmation runs after the event handler returned, and the item may vanish */
-		const std::string cena = ativaStd();
-		const int64_t id = it.id;
-		const QString nome = nomeUi(it.nome);
-		QPointer<Visor> self(this);
-		QTimer::singleShot(0, this, [self, cena, id, nome] {
-			if (!self)
-				return;
-			if (!confirmar(self, T("Remover fonte"), T("Remover \"%1\" desta cena vertical?").arg(nome),
-				       T("Remover")))
-				return;
-			if (!self || ativaStd() != cena)
-				return;
-			std::vector<vertical_item> v(MAX_ITENS_UI);
-			const size_t n = vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
-			bool existe = false;
-			for (size_t i = 0; i < n; i++)
-				if (v[i].id == id)
-					existe = true;
-			if (!existe)
-				return;
-			vertical_item_remover(cena.c_str(), id);
-			hub().selecionar(0);
-			self->recarregar();
-		});
+		menuFonte(this, ativaStd(), it.id, global, nullptr);
 	}
 
 	void atualizarCursor(const vec2 &p)
@@ -1301,9 +1889,7 @@ public:
 		barra->setSpacing(6);
 		rotulo = new LabelElidido(this, "mut");
 		botao = new QPushButton(T("Transmitir vertical"), this);
-		botao->setCursor(Qt::PointingHandCursor);
 		botao->setFocusPolicy(Qt::NoFocus);
-		setAcao(botao, "iniciar");
 		barra->addWidget(rotulo, 1);
 		barra->addWidget(botao);
 		v->addLayout(barra);
@@ -1374,7 +1960,6 @@ private:
 		QString txt = rodando ? T("Parar vertical") : T("Transmitir vertical");
 		if (botao->text() != txt)
 			botao->setText(txt);
-		setAcao(botao, rodando ? "parar" : "iniciar");
 		QString dica = verticais > 0 ? QString() : T("Configure uma saída vertical no LiveHub");
 		if (botao->toolTip() != dica.toHtmlEscaped())
 			botao->setToolTip(dica.toHtmlEscaped());
@@ -1425,50 +2010,6 @@ private:
 /* Scenes dock                                                                                                  */
 /* ------------------------------------------------------------------------------------------------------------ */
 
-class LinhaClicavel : public QFrame {
-public:
-	using QFrame::QFrame;
-	std::function<void()> clique, duplo;
-
-protected:
-	void mousePressEvent(QMouseEvent *e) override
-	{
-		if (e->button() == Qt::LeftButton && clique)
-			clique();
-		QFrame::mousePressEvent(e);
-	}
-	void mouseDoubleClickEvent(QMouseEvent *e) override
-	{
-		if (e->button() == Qt::LeftButton && duplo)
-			duplo();
-	}
-};
-
-/* Tracks the open popup so the periodic refresh does not rebuild the row under the user's hand. */
-class ComboLigacao : public QComboBox {
-public:
-	explicit ComboLigacao(QWidget *pai) : QComboBox(pai)
-	{
-		setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
-		setMinimumContentsLength(6);
-		setMaximumWidth(140);
-		setFocusPolicy(Qt::NoFocus);
-	}
-	static int abertos;
-	void showPopup() override
-	{
-		abertos++;
-		QComboBox::showPopup();
-	}
-	void hidePopup() override
-	{
-		QComboBox::hidePopup();
-		if (abertos > 0)
-			abertos--;
-	}
-};
-int ComboLigacao::abertos = 0;
-
 class EditorNome : public QLineEdit {
 public:
 	using QLineEdit::QLineEdit;
@@ -1486,372 +2027,524 @@ protected:
 	}
 };
 
-std::vector<std::string> cenasPrincipais()
-{
-	std::vector<std::string> r;
-	struct obs_frontend_source_list lista = {};
-	obs_frontend_get_scenes(&lista);
-	for (size_t i = 0; i < lista.sources.num; i++)
-		r.push_back(obs_source_get_name(lista.sources.array[i]));
-	obs_frontend_source_list_free(&lista);
-	return r;
-}
+/* ------------------------------------------------------------------------------------------------------------ */
+/* Scenes / Sources docks (look and behavior of the OBS docks)                                                  */
+/* ------------------------------------------------------------------------------------------------------------ */
 
-QString assinatura(const std::vector<std::string> &v)
-{
-	QString s;
-	for (const auto &n : v)
-		s += QString::fromUtf8(n.c_str()) + QChar(0x1f);
-	return s;
-}
+/* List with OBS-like drag & drop: the drop is reported as (from, to) final rows and applied by the engine; the
+ * periodic refresh then rebuilds the rows (item widgets do not survive Qt's own move). */
+class ListaOrdenavel : public QListWidget {
+public:
+	explicit ListaOrdenavel(QWidget *pai) : QListWidget(pai)
+	{
+		setFrameShape(QFrame::NoFrame);
+		setFrameShadow(QFrame::Plain);
+		setSpacing(0); /* QTBUG-106395, as in OBS */
+		setDragEnabled(true);
+		setDragDropMode(QAbstractItemView::InternalMove);
+		setDefaultDropAction(Qt::TargetMoveAction);
+		setDropIndicatorShown(true);
+		setContextMenuPolicy(Qt::CustomContextMenu);
+		setSelectionMode(QAbstractItemView::SingleSelection);
+		setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Expanding);
+	}
+
+	std::function<void(int, int)> mover;
+	std::function<void()> renomear, remover, vazio;
+
+	bool ocupada() const { return state() == DraggingState || state() == EditingState; }
+
+protected:
+	void dropEvent(QDropEvent *e) override
+	{
+		const int de = currentRow();
+		if (e->source() != this || de < 0) {
+			e->ignore();
+			return;
+		}
+		const QPoint p = e->position().toPoint();
+		const QModelIndex idx = indexAt(p);
+		int para = count();
+		if (idx.isValid())
+			para = p.y() < visualRect(idx).center().y() ? idx.row() : idx.row() + 1;
+		if (de < para)
+			para--;
+		e->setDropAction(Qt::IgnoreAction); /* nothing is moved by Qt */
+		e->accept();
+		stopAutoScroll();
+		setState(NoState);
+		viewport()->update();
+		if (para != de && mover)
+			mover(de, para);
+	}
+
+	void keyPressEvent(QKeyEvent *e) override
+	{
+		if (e->key() == Qt::Key_F2 && renomear) {
+			renomear();
+			return;
+		}
+		if ((e->key() == Qt::Key_Delete || e->key() == Qt::Key_Backspace) && remover) {
+			remover();
+			return;
+		}
+		QListWidget::keyPressEvent(e);
+	}
+
+	void mousePressEvent(QMouseEvent *e) override
+	{
+		if (vazio && !indexAt(e->position().toPoint()).isValid()) {
+			QListWidget::mousePressEvent(e);
+			clearSelection();
+			setCurrentItem(nullptr);
+			vazio();
+			return;
+		}
+		QListWidget::mousePressEvent(e);
+	}
+};
+
+/* Like OBS SceneRenameDelegate: validates the new name and renames through the engine. */
+class DelegadoRenomearCena : public QStyledItemDelegate {
+public:
+	using QStyledItemDelegate::QStyledItemDelegate;
+
+	void setModelData(QWidget *editor, QAbstractItemModel *model, const QModelIndex &index) const override
+	{
+		auto *le = qobject_cast<QLineEdit *>(editor);
+		if (!le)
+			return;
+		const QString novo = le->text().trimmed();
+		const QString antigo = index.data(Qt::DisplayRole).toString();
+		QWidget *pai = editor->window();
+		if (novo.isEmpty()) {
+			infoBox(pai, OT("NoNameEntered.Title"), OT("NoNameEntered.Text"), QMessageBox::Information);
+			return;
+		}
+		if (novo == antigo)
+			return;
+		if (const char *e = vertical_cena_renomear(antigo.toUtf8().constData(), novo.toUtf8().constData())) {
+			aviso(pai, e);
+			return;
+		}
+		model->setData(index, novo, Qt::DisplayRole);
+	}
+};
 
 class DockCenas : public Raiz {
 public:
 	explicit DockCenas(QWidget *pai = nullptr) : Raiz(pai)
 	{
 		auto *v = new QVBoxLayout(this);
-		v->setContentsMargins(8, 8, 8, 8);
-		v->setSpacing(6);
+		v->setContentsMargins(0, 0, 0, 0);
+		v->setSpacing(0);
 
-		auto *topo = new QHBoxLayout();
-		topo->setSpacing(4);
-		topo->addWidget(criarLabel(this, "h3", T("CENAS VERTICAIS")), 1);
-		btnNova = criarMini(this, "+", T("Nova cena"));
-		btnRenomear = new QPushButton(T("Renomear"), this);
-		btnRemover = new QPushButton(T("Remover"), this);
-		for (QPushButton *b : {btnRenomear, btnRemover}) {
-			b->setCursor(Qt::PointingHandCursor);
-			b->setFocusPolicy(Qt::NoFocus);
-			b->setStyleSheet("padding:0 8px;font-size:11px;");
-		}
-		topo->addWidget(btnNova);
-		topo->addWidget(btnRenomear);
-		topo->addWidget(btnRemover);
-		v->addLayout(topo);
+		lista = new ListaOrdenavel(this);
+		lista->setItemDelegate(new DelegadoRenomearCena(lista));
+		v->addWidget(lista, 1);
 
-		auto *scroll = new QScrollArea(this);
-		scroll->setFrameShape(QFrame::NoFrame);
-		scroll->setWidgetResizable(true);
-		scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-		scroll->viewport()->setAutoFillBackground(false);
-		auto *conteudo = new QWidget();
-		conteudo->setObjectName("lhvConteudo");
-		scroll->setWidget(conteudo);
-		linhas = new QVBoxLayout(conteudo);
-		linhas->setContentsMargins(0, 0, 0, 0);
-		linhas->setSpacing(4);
-		v->addWidget(scroll, 1);
+		barra = criarBarra(this);
+		aAdd = acaoBarra(barra, "icon-plus", OT("Add"), OT("AddScene"));
+		aRem = acaoBarra(barra, "icon-trash", OT("Remove"), OT("RemoveScene"));
+		barra->addSeparator();
+		aFiltros = acaoBarra(barra, "icon-filter", OT("Filters"), OT("SceneFilters"));
+		barra->addSeparator();
+		aSobe = acaoBarra(barra, "icon-up", OT("Basic.MainMenu.Edit.Order.MoveUp"), OT("MoveSceneUp"));
+		aDesce = acaoBarra(barra, "icon-down", OT("Basic.MainMenu.Edit.Order.MoveDown"), OT("MoveSceneDown"));
+		v->addWidget(barra);
 
-		QObject::connect(btnNova, &QPushButton::clicked, this, [this] { nova(); });
-		QObject::connect(btnRenomear, &QPushButton::clicked, this, [this] { renomearAtiva(); });
-		QObject::connect(btnRemover, &QPushButton::clicked, this, [this] { removerAtiva(); });
+		QObject::connect(aAdd, &QAction::triggered, this, [this] { nova(); });
+		QObject::connect(aRem, &QAction::triggered, this, [this] { remover(); });
+		QObject::connect(aFiltros, &QAction::triggered, this, [this] { filtros(); });
+		QObject::connect(aSobe, &QAction::triggered, this, [this] { moverRelativo(-1); });
+		QObject::connect(aDesce, &QAction::triggered, this, [this] { moverRelativo(1); });
+
+		QObject::connect(lista, &QListWidget::currentItemChanged, this, [this](QListWidgetItem *it, QListWidgetItem *) {
+			if (sincronizando || !it)
+				return;
+			if (const char *e = vertical_cena_ativar(it->text().toUtf8().constData()))
+				aviso(this, e);
+		});
+		QObject::connect(lista, &QWidget::customContextMenuRequested, this,
+				 [this](const QPoint &p) { menu(lista->itemAt(p) != nullptr); });
+		lista->mover = [this](int de, int para) {
+			QListWidgetItem *it = lista->item(de);
+			if (it)
+				vertical_cena_mover(it->text().toUtf8().constData(), para);
+			atualizar();
+		};
+		lista->renomear = [this] { renomear(); };
+		lista->remover = [this] { remover(); };
 
 		timer = new QTimer(this);
-		timer->setInterval(500);
+		timer->setInterval(250);
 		QObject::connect(timer, &QTimer::timeout, this, [this] { tick(); });
 		atualizar();
 		timer->start();
 	}
 
-	~DockCenas() override
-	{
-		if (timer)
-			timer->stop();
-	}
-
 private:
-	QPushButton *btnNova = nullptr, *btnRenomear = nullptr, *btnRemover = nullptr;
-	QVBoxLayout *linhas = nullptr;
+	ListaOrdenavel *lista = nullptr;
+	QToolBar *barra = nullptr;
+	QAction *aAdd = nullptr, *aRem = nullptr, *aFiltros = nullptr, *aSobe = nullptr, *aDesce = nullptr;
 	QTimer *timer = nullptr;
-	uint64_t vistaV = 0;
-	QString vistaPrincipais;
-	QLineEdit *editando = nullptr;
+	QString vista;
+	bool sincronizando = false;
 
 	void tick()
 	{
-		if (editando || ComboLigacao::abertos > 0)
-			return;
-		QString sig = assinatura(cenasPrincipais());
-		if (vertical_versao() == vistaV && sig == vistaPrincipais)
-			return;
-		atualizar();
+		if (!lista->ocupada())
+			atualizar();
 	}
 
+	QStringList nomes()
+	{
+		std::vector<vertical_cena> c(MAX_CENAS_UI);
+		const size_t n = vertical_cenas_listar(c.data(), MAX_CENAS_UI);
+		QStringList r;
+		for (size_t i = 0; i < n; i++)
+			r << QString::fromUtf8(c[i].nome);
+		return r;
+	}
+
+	void atualizar()
+	{
+		std::vector<vertical_cena> c(MAX_CENAS_UI);
+		const size_t n = vertical_cenas_listar(c.data(), MAX_CENAS_UI);
+		QString sig;
+		for (size_t i = 0; i < n; i++)
+			sig += QString::fromUtf8(c[i].nome) + (c[i].ativa ? "\x1e*" : "\x1e") + QChar(0x1f);
+		if (sig == vista)
+			return;
+		vista = sig;
+		sincronizando = true;
+		lista->clear();
+		int ativa = -1;
+		for (size_t i = 0; i < n; i++) {
+			lista->addItem(QString::fromUtf8(c[i].nome));
+			if (c[i].ativa)
+				ativa = int(i);
+		}
+		if (ativa >= 0)
+			lista->setCurrentRow(ativa);
+		sincronizando = false;
+	}
+
+	QString nomeAtual() const
+	{
+		QListWidgetItem *it = lista->currentItem();
+		return it ? it->text() : QString();
+	}
+
+	/* Adapted from OBSBasic::on_actionAddScene_triggered. */
 	void nova()
 	{
-		struct vertical_cena existentes[MAX_CENAS_UI];
-		size_t n = vertical_cenas_listar(existentes, MAX_CENAS_UI);
-		QString padrao;
-		for (int i = 1; i < 1000; i++) {
-			padrao = T("Vertical %1").arg(i);
-			bool uso = false;
-			for (size_t k = 0; k < n; k++)
-				if (nomeUi(existentes[k].nome) == padrao)
-					uso = true;
-			if (!uso)
-				break;
+		const QStringList existentes = nomes();
+		const QString formato = OT("Basic.Main.DefaultSceneName.Text");
+		int i = 2;
+		QString padrao = formato.arg(i);
+		while (existentes.contains(padrao))
+			padrao = formato.arg(++i);
+		QString nome;
+		if (!pedirNome(this, OT("Basic.Main.AddSceneDlg.Title"), OT("Basic.Main.AddSceneDlg.Text"), padrao,
+			       [&](const QString &n) { return nomes().contains(n); }, nome))
+			return;
+		if (const char *e = vertical_cena_criar(nome.toUtf8().constData())) {
+			aviso(this, e);
+			return;
 		}
-		bool ok = false;
-		QInputDialog dlg(this);
-		dlg.setWindowTitle(T("Nova cena vertical"));
-		dlg.setLabelText(T("Nome da cena"));
-		dlg.setTextValue(padrao);
-		dlg.setOkButtonText(T("Criar"));
-		dlg.setCancelButtonText(T("Cancelar"));
-		ok = dlg.exec() == QDialog::Accepted;
-		QString nome = dlg.textValue().trimmed();
-		if (!ok || nome.isEmpty())
-			return;
-		const char *e = vertical_cena_criar(nome.toUtf8().constData());
-		if (e)
-			aviso(this, e);
+		vertical_cena_ativar(nome.toUtf8().constData());
 		atualizar();
 	}
 
-	std::string ativaNome() { return ativaStd(); }
-
-	void renomearAtiva()
+	/* Adapted from OBSBasic::DuplicateSelectedScene. */
+	void duplicar()
 	{
-		std::string a = ativaNome();
-		if (a.empty())
+		const QString atual = nomeAtual();
+		if (atual.isEmpty())
 			return;
-		bool ok = false;
-		QInputDialog dlg(this);
-		dlg.setWindowTitle(T("Renomear cena"));
-		dlg.setLabelText(T("Novo nome"));
-		dlg.setTextValue(nomeUi(a.c_str()));
-		dlg.setOkButtonText(T("Renomear"));
-		dlg.setCancelButtonText(T("Cancelar"));
-		ok = dlg.exec() == QDialog::Accepted;
-		QString nome = dlg.textValue().trimmed();
-		if (!ok || nome.isEmpty())
+		const QString formato = atual + " %1";
+		int i = 2;
+		QString padrao = formato.arg(i);
+		while (nomes().contains(padrao))
+			padrao = formato.arg(++i);
+		QString nome;
+		if (!pedirNome(this, OT("Basic.Main.AddSceneDlg.Title"), OT("Basic.Main.AddSceneDlg.Text"), padrao,
+			       [&](const QString &n) { return nomes().contains(n); }, nome))
 			return;
-		const char *e = vertical_cena_renomear(a.c_str(), nome.toUtf8().constData());
-		if (e)
+		if (const char *e = vertical_cena_duplicar(atual.toUtf8().constData(), nome.toUtf8().constData())) {
 			aviso(this, e);
+			return;
+		}
+		vertical_cena_ativar(nome.toUtf8().constData());
 		atualizar();
 	}
 
-	void removerAtiva()
+	void remover()
 	{
-		const std::string a = ativaNome();
-		if (a.empty())
+		const QString atual = nomeAtual();
+		if (atual.isEmpty())
 			return;
+		/* deferred: may be called from a key press / menu handler */
 		QPointer<DockCenas> self(this);
-		QTimer::singleShot(0, this, [self, a] {
-			if (!self)
+		QTimer::singleShot(0, this, [self, atual] {
+			if (!self || !confirmarRemocao(self, atual))
 				return;
-			if (!confirmar(self, T("Remover cena"),
-				       T("Remover a cena \"%1\" e seus itens?").arg(nomeUi(a.c_str())), T("Remover")))
-				return;
-			if (!self)
-				return;
-			const char *e = vertical_cena_remover(a.c_str()); /* by name: fails cleanly if it vanished */
-			if (e)
+			if (const char *e = vertical_cena_remover(atual.toUtf8().constData()))
 				aviso(self, e);
 			self->atualizar();
 		});
 	}
 
-	void ativar(const std::string &nome)
+	void renomear()
 	{
-		if (nome == ativaStd())
+		QListWidgetItem *it = lista->currentItem();
+		if (!it)
 			return;
-		const char *e = vertical_cena_ativar(nome.c_str());
-		if (e)
-			aviso(this, e);
+		const Qt::ItemFlags f = it->flags();
+		it->setFlags(f | Qt::ItemIsEditable);
+		lista->editItem(it);
+		it->setFlags(f);
+	}
+
+	void filtros()
+	{
+		obs_source_t *s = vertical_cena_ativa_ref();
+		if (!s)
+			return;
+		obs_frontend_open_source_filters(s);
+		obs_source_release(s);
+	}
+
+	void moverRelativo(int delta)
+	{
+		const int r = lista->currentRow();
+		const QString nome = nomeAtual();
+		if (r < 0 || r + delta < 0 || r + delta >= lista->count())
+			return;
+		vertical_cena_mover(nome.toUtf8().constData(), r + delta);
 		atualizar();
 	}
 
-	void renomearInline(LinhaClicavel *linha, LabelElidido *rotulo, const std::string &nome)
+	void moverPara(int pos)
 	{
-		if (editando)
+		const QString nome = nomeAtual();
+		if (nome.isEmpty())
 			return;
-		auto *ed = new EditorNome(nomeUi(nome.c_str()), linha);
-		editando = ed;
-		auto *h = qobject_cast<QHBoxLayout *>(linha->layout());
-		if (h)
-			h->insertWidget(0, ed, 1);
-		rotulo->hide();
-		ed->show();
-		ed->setFocus();
-		ed->selectAll();
-
-		auto terminar = [this, ed](bool aplicar, const std::string &antigo) {
-			if (editando != ed)
-				return;
-			editando = nullptr;
-			QString novo = ed->text().trimmed();
-			ed->hide();
-			ed->deleteLater();
-			if (aplicar && !novo.isEmpty() && novo != nomeUi(antigo.c_str())) {
-				const char *e = vertical_cena_renomear(antigo.c_str(), novo.toUtf8().constData());
-				if (e)
-					aviso(this, e);
-			}
-			QTimer::singleShot(0, this, [this] { atualizar(); });
-		};
-		QObject::connect(ed, &QLineEdit::editingFinished, this, [terminar, nome] { terminar(true, nome); });
-		ed->cancelar = [terminar, nome] {
-			terminar(false, nome);
-		};
+		vertical_cena_mover(nome.toUtf8().constData(), pos);
+		atualizar();
 	}
 
-	void atualizar()
+	/* Adapted from OBSBasic::on_scenes_customContextMenuRequested, plus the LiveHub link. */
+	void menu(bool temItem)
 	{
-		vistaV = vertical_versao();
-		std::vector<std::string> principais = cenasPrincipais();
-		vistaPrincipais = assinatura(principais);
-		limparLayout(linhas);
+		QMenu popup(this);
+		popup.addAction(OT("AddScene") + "...", this, [this] { nova(); });
+		if (temItem) {
+			popup.addSeparator();
+			popup.addAction(OT("Duplicate"), this, [this] { QTimer::singleShot(0, this, [this] { duplicar(); }); });
+			popup.addSeparator();
+			popup.addAction(semReticencias(OT("Rename")), this, [this] { renomear(); });
+			popup.addAction(OT("Remove"), this, [this] { remover(); });
+			popup.addSeparator();
+			QMenu *ordem = popup.addMenu(OT("Basic.MainMenu.Edit.Order"));
+			ordem->addAction(OT("Basic.MainMenu.Edit.Order.MoveUp"), this, [this] { moverRelativo(-1); });
+			ordem->addAction(OT("Basic.MainMenu.Edit.Order.MoveDown"), this, [this] { moverRelativo(1); });
+			ordem->addSeparator();
+			ordem->addAction(OT("Basic.MainMenu.Edit.Order.MoveToTop"), this, [this] { moverPara(0); });
+			ordem->addAction(OT("Basic.MainMenu.Edit.Order.MoveToBottom"), this,
+					 [this] { moverPara(lista->count() - 1); });
+			popup.addSeparator();
+			popup.addAction(OT("Filters"), this, [this] { filtros(); });
 
-		struct vertical_cena cenas[MAX_CENAS_UI];
-		size_t n = vertical_cenas_listar(cenas, MAX_CENAS_UI);
-		bool disp = vertical_disponivel();
-		btnNova->setEnabled(disp);
-		btnRenomear->setEnabled(n > 0);
-		btnRemover->setEnabled(n > 0);
-
-		if (!disp || n == 0) {
-			auto *l = criarLabel(this, "mut",
-					     disp ? T("Nenhuma cena vertical. Use + para criar.")
-						  : T("Canvas vertical indisponível."));
-			l->setWordWrap(true);
-			linhas->addWidget(l);
-		}
-
-		for (size_t i = 0; i < n; i++) {
-			std::string nome = cenas[i].nome;
-			QHBoxLayout *h = nullptr;
-			auto *linha = new LinhaClicavel(this);
-			linha->setObjectName("linha");
-			h = new QHBoxLayout(linha);
-			h->setContentsMargins(8, 3, 8, 3);
-			h->setSpacing(6);
-			estiloLinha(linha, cenas[i].ativa ? "#3ddc84" : "#2a2a36");
-			linha->setCursor(Qt::PointingHandCursor);
-
-			auto *rotulo = new LabelElidido(linha, "nome");
-			rotulo->setCompleto(nomeUi(nome.c_str()));
-			auto *info = criarLabel(linha, "mut11", T("%1 it.").arg(cenas[i].itens));
-			auto *lig = criarLabel(linha, "mut11", T("Ligada a:"));
-			auto *combo = new ComboLigacao(linha);
-			combo->addItem(T("—"), QString());
-			char ligada[VERTICAL_NOME_MAX];
-			vertical_ligacao_obter(nome.c_str(), ligada, sizeof(ligada));
-			QString ligadaQ = nomeUi(ligada);
-			bool achou = ligadaQ.isEmpty();
-			for (const std::string &p : principais) {
-				QString pq = nomeUi(p.c_str());
-				combo->addItem(pq, pq);
-				combo->setItemData(combo->count() - 1, pq.toHtmlEscaped(), Qt::ToolTipRole);
-				if (pq == ligadaQ)
-					achou = true;
+			/* LiveHub-specific: auto switch with a horizontal (main) scene. */
+			popup.addSeparator();
+			const QString vnome = nomeAtual();
+			char atualLig[VERTICAL_NOME_MAX];
+			vertical_ligacao_obter(vnome.toUtf8().constData(), atualLig, sizeof(atualLig));
+			const QString ligada = QString::fromUtf8(atualLig);
+			QMenu *lig = popup.addMenu(T("Trocar junto com a cena horizontal"));
+			auto definir = [this, vnome](const QString &principal) {
+				if (const char *e = vertical_ligacao_definir(vnome.toUtf8().constData(),
+									     principal.toUtf8().constData()))
+					aviso(this, e);
+			};
+			QAction *nenhuma = lig->addAction(T("Nenhuma"));
+			nenhuma->setCheckable(true);
+			nenhuma->setChecked(ligada.isEmpty());
+			QObject::connect(nenhuma, &QAction::triggered, this, [definir] { definir(QString()); });
+			for (const std::string &p : cenasPrincipais()) {
+				const QString pq = QString::fromUtf8(p.c_str());
+				QAction *a = lig->addAction(escapar(pq));
+				a->setCheckable(true);
+				a->setChecked(pq == ligada);
+				QObject::connect(a, &QAction::triggered, this, [definir, pq] { definir(pq); });
 			}
-			if (!achou)
-				combo->addItem(ligadaQ, ligadaQ);
-			combo->setCurrentIndex(std::max(0, combo->findData(ligadaQ)));
-			combo->setToolTip(
-				T("Cena horizontal que ativa esta cena vertical automaticamente").toHtmlEscaped());
-
-			h->addWidget(rotulo, 1);
-			h->addWidget(info);
-			h->addWidget(lig);
-			h->addWidget(combo);
-			linhas->addWidget(linha);
-
-			linha->clique = [this, nome] {
-				ativar(nome);
-			};
-			linha->duplo = [this, linha, rotulo, nome] {
-				renomearInline(linha, rotulo, nome);
-			};
-			QObject::connect(
-				combo, QOverload<int>::of(&QComboBox::activated), this, [this, combo, nome](int idx) {
-					QString p = combo->itemData(idx).toString();
-					const char *e = vertical_ligacao_definir(nome.c_str(), p.toUtf8().constData());
-					if (e)
-						aviso(this, e);
-				});
 		}
-		linhas->addStretch(1);
+		popup.exec(QCursor::pos());
 	}
 };
 
-/* ------------------------------------------------------------------------------------------------------------ */
-/* Sources dock                                                                                                 */
-/* ------------------------------------------------------------------------------------------------------------ */
+/* Source row like OBS SourceTreeItem: type icon, name, visibility and lock check boxes. */
+class LinhaFonte : public QWidget {
+public:
+	LinhaFonte(const vertical_item &it, const QIcon &icone, QWidget *pai = nullptr) : QWidget(pai)
+	{
+		const QString nome = QString::fromUtf8(it.nome);
+		auto *iconLabel = new QLabel(this);
+		iconLabel->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Maximum);
+		iconLabel->setPixmap(icone.pixmap(QSize(16, 16)));
+		iconLabel->setEnabled(it.visivel);
+		iconLabel->setStyleSheet("background: none");
+		iconLabel->setProperty("class", "source-icon");
 
-QIcon iconeOlho(bool visivel)
-{
-	static QIcon cache[2];
-	QIcon &ic = cache[visivel ? 1 : 0];
-	if (!ic.isNull())
-		return ic;
-	QPixmap pm(32, 32);
-	pm.setDevicePixelRatio(2.0);
-	pm.fill(Qt::transparent);
-	QPainter p(&pm);
-	p.setRenderHint(QPainter::Antialiasing);
-	QColor cor = visivel ? QColor("#ececf1") : QColor("#6a6a7c");
-	QPen pen(cor, 1.5);
-	pen.setCapStyle(Qt::RoundCap);
-	p.setPen(pen);
-	QPainterPath caminho;
-	caminho.moveTo(1.5, 8);
-	caminho.quadTo(8, -0.5, 14.5, 8);
-	caminho.quadTo(8, 16.5, 1.5, 8);
-	p.drawPath(caminho);
-	p.setBrush(cor);
-	p.drawEllipse(QPointF(8, 8), 2.2, 2.2);
-	if (!visivel) {
-		p.setPen(QPen(QColor("#ff8a8a"), 1.6, Qt::SolidLine, Qt::RoundCap));
-		p.drawLine(QPointF(3, 14), QPointF(13, 2));
+		vis = new QCheckBox(this);
+		vis->setProperty("class", "checkbox-icon indicator-visibility");
+		vis->setChecked(it.visivel);
+		vis->setAccessibleName(OT("Basic.Main.Sources.Visibility"));
+		vis->setAccessibleDescription(OT("Basic.Main.Sources.VisibilityDescription").arg(nome));
+		vis->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+
+		lock = new QCheckBox(this);
+		lock->setProperty("class", "checkbox-icon indicator-lock");
+		lock->setChecked(it.bloqueado);
+		lock->setAccessibleName(OT("Basic.Main.Sources.Lock"));
+		lock->setAccessibleDescription(OT("Basic.Main.Sources.LockDescription").arg(nome));
+		lock->setSizePolicy(QSizePolicy::Maximum, QSizePolicy::Preferred);
+
+		label = new QLabel(nome, this);
+		label->setTextFormat(Qt::PlainText);
+		label->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+		label->setAttribute(Qt::WA_TranslucentBackground);
+		label->setEnabled(it.visivel);
+
+		caixa = new QHBoxLayout(this);
+		caixa->setContentsMargins(0, 0, 0, 0);
+		caixa->setSpacing(0);
+		caixa->addWidget(iconLabel);
+		caixa->addSpacing(2);
+		caixa->addWidget(label);
+		caixa->addWidget(vis);
+		caixa->addWidget(lock);
+
+		QObject::connect(vis, &QCheckBox::clicked, this, [this](bool v) {
+			if (aoVisivel)
+				aoVisivel(v);
+		});
+		QObject::connect(lock, &QCheckBox::clicked, this, [this](bool v) {
+			if (aoBloquear)
+				aoBloquear(v);
+		});
 	}
-	p.end();
-	ic = QIcon(pm);
-	return ic;
-}
+
+	std::function<void(bool)> aoVisivel, aoBloquear;
+	std::function<void(const QString &)> aoRenomear;
+
+	/* Inline rename, like SourceTreeItem::EnterEditMode. */
+	void editar()
+	{
+		if (editor)
+			return;
+		editor = new EditorNome(label->text(), this);
+		editor->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+		const int idx = caixa->indexOf(label);
+		caixa->removeWidget(label);
+		label->hide();
+		caixa->insertWidget(idx, editor);
+		editor->selectAll();
+		editor->setFocus();
+		editor->cancelar = [this] { sair(false); };
+		QObject::connect(editor, &QLineEdit::editingFinished, this, [this] { sair(true); });
+	}
+
+	bool editando() const { return editor != nullptr; }
+
+private:
+	QLabel *label = nullptr;
+	QCheckBox *vis = nullptr, *lock = nullptr;
+	QHBoxLayout *caixa = nullptr;
+	EditorNome *editor = nullptr;
+
+	void sair(bool salvar)
+	{
+		if (!editor)
+			return;
+		EditorNome *e = editor;
+		editor = nullptr;
+		const QString novo = e->text();
+		const int idx = caixa->indexOf(e);
+		caixa->removeWidget(e);
+		e->hide();
+		e->deleteLater();
+		caixa->insertWidget(idx, label);
+		label->show();
+		if (salvar && aoRenomear) {
+			auto f = aoRenomear;
+			QTimer::singleShot(0, this, [f, novo] { f(novo); });
+		}
+	}
+};
 
 class DockFontes : public Raiz {
 public:
 	explicit DockFontes(QWidget *pai = nullptr) : Raiz(pai)
 	{
 		auto *v = new QVBoxLayout(this);
-		v->setContentsMargins(8, 8, 8, 8);
-		v->setSpacing(6);
+		v->setContentsMargins(0, 0, 0, 0);
+		v->setSpacing(0);
 
-		auto *topo = new QHBoxLayout();
-		topo->setSpacing(4);
-		topo->addWidget(criarLabel(this, "h3", T("FONTES DA CENA")), 1);
-		btnAdd = new QPushButton(T("+ Adicionar fonte"), this);
-		btnAdd->setCursor(Qt::PointingHandCursor);
-		btnAdd->setFocusPolicy(Qt::NoFocus);
-		topo->addWidget(btnAdd);
-		v->addLayout(topo);
+		lista = new ListaOrdenavel(this);
+		v->addWidget(lista, 1);
 
-		auto *scroll = new QScrollArea(this);
-		scroll->setFrameShape(QFrame::NoFrame);
-		scroll->setWidgetResizable(true);
-		scroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
-		scroll->viewport()->setAutoFillBackground(false);
-		auto *conteudo = new QWidget();
-		conteudo->setObjectName("lhvConteudo");
-		scroll->setWidget(conteudo);
-		linhas = new QVBoxLayout(conteudo);
-		linhas->setContentsMargins(0, 0, 0, 0);
-		linhas->setSpacing(4);
-		v->addWidget(scroll, 1);
+		barra = criarBarra(this);
+		aAdd = acaoBarra(barra, "icon-plus", OT("Add"), OT("AddSource"));
+		aRem = acaoBarra(barra, "icon-trash", OT("Remove"), OT("RemoveSource"));
+		barra->addSeparator();
+		aProps = acaoBarra(barra, "icon-gear", OT("Properties"), OT("SourceProperties"));
+		barra->addSeparator();
+		aSobe = acaoBarra(barra, "icon-up", OT("Basic.MainMenu.Edit.Order.MoveUp"), OT("MoveSourceUp"));
+		aDesce = acaoBarra(barra, "icon-down", OT("Basic.MainMenu.Edit.Order.MoveDown"), OT("MoveSourceDown"));
+		v->addWidget(barra);
+		atualizarAcoes();
 
-		QObject::connect(btnAdd, &QPushButton::clicked, this, [this] { menuAdicionar(); });
-		hub().ouvir(this, [this] { QTimer::singleShot(0, this, [this] { atualizar(); }); });
+		QObject::connect(aAdd, &QAction::triggered, this, [this] { abrirMenuAdicionar(this, QCursor::pos()); });
+		QObject::connect(aRem, &QAction::triggered, this, [this] { remover(); });
+		QObject::connect(aProps, &QAction::triggered, this, [this] { propriedades(); });
+		QObject::connect(aSobe, &QAction::triggered, this, [this] { mover(Ordem::Subir); });
+		QObject::connect(aDesce, &QAction::triggered, this, [this] { mover(Ordem::Descer); });
+
+		QObject::connect(lista, &QListWidget::currentItemChanged, this, [this] {
+			atualizarAcoes();
+			if (sincronizando)
+				return;
+			hub().selecionar(idAtual());
+		});
+		QObject::connect(lista, &QListWidget::itemDoubleClicked, this, [this] { propriedades(); });
+		QObject::connect(lista, &QWidget::customContextMenuRequested, this, [this](const QPoint &) {
+			const int64_t id = idAtual();
+			QTimer::singleShot(0, this, [this, id] { menuFonte(this, cena, id, QCursor::pos(), [this] { renomear(); }); });
+		});
+		lista->mover = [this](int de, int para) {
+			QListWidgetItem *it = lista->item(de);
+			if (!it)
+				return;
+			const int n = lista->count();
+			vertical_item_ordem(cena.c_str(), it->data(Qt::UserRole).toLongLong(), n - 1 - para);
+			atualizar(true);
+		};
+		lista->renomear = [this] { renomear(); };
+		lista->remover = [this] { remover(); };
+		lista->vazio = [this] { hub().selecionar(0); };
+
+		hub().ouvir(this, [this] { QTimer::singleShot(0, this, [this] { sincronizarSelecao(); }); });
 
 		timer = new QTimer(this);
-		timer->setInterval(500);
+		timer->setInterval(250);
 		QObject::connect(timer, &QTimer::timeout, this, [this] {
-			if (vertical_versao() != vistaV)
-				atualizar();
+			if (!lista->ocupada() && !editandoLinha())
+				atualizar(false);
 		});
-		atualizar();
+		atualizar(true);
 		timer->start();
 	}
 
@@ -1863,172 +2556,151 @@ public:
 	}
 
 private:
-	QPushButton *btnAdd = nullptr;
-	QVBoxLayout *linhas = nullptr;
+	ListaOrdenavel *lista = nullptr;
+	QToolBar *barra = nullptr;
+	QAction *aAdd = nullptr, *aRem = nullptr, *aProps = nullptr, *aSobe = nullptr, *aDesce = nullptr;
 	QTimer *timer = nullptr;
-	uint64_t vistaV = 0;
+	QString vista;
+	std::string cena;
+	bool sincronizando = false;
 
-	void menuAdicionar()
+	int64_t idAtual() const
 	{
-		std::string cena = ativaStd();
-		if (cena.empty())
-			return;
-		std::vector<std::string> fontes;
-		obs_enum_sources(
-			[](void *p, obs_source_t *s) {
-				auto *v = static_cast<std::vector<std::string> *>(p);
-				if (obs_source_is_group(s))
-					return true;
-				if (!(obs_source_get_output_flags(s) & OBS_SOURCE_VIDEO))
-					return true;
-				v->push_back(obs_source_get_name(s));
-				return true;
-			},
-			&fontes);
-		std::vector<std::string> cenas = cenasPrincipais();
-		auto ordenar = [](std::vector<std::string> &v) {
-			std::sort(v.begin(), v.end(), [](const std::string &a, const std::string &b) {
-				return QString::fromUtf8(a.c_str()).compare(QString::fromUtf8(b.c_str()),
-									    Qt::CaseInsensitive) < 0;
-			});
-		};
-		ordenar(fontes);
-
-		QMenu menu(this);
-		auto adicionar = [this, cena](const std::string &nome) {
-			int64_t id = 0;
-			const char *e = vertical_item_adicionar(cena.c_str(), nome.c_str(), &id);
-			if (e) {
-				aviso(this, e);
-				return;
-			}
-			hub().selecionar(id);
-			atualizar();
-		};
-		auto escapar = [](const std::string &s) {
-			return nomeUi(s.c_str()).replace("&", "&&");
-		};
-		if (fontes.empty() && cenas.empty()) {
-			menu.addAction(T("Nenhuma fonte disponível"))->setEnabled(false);
-		}
-		for (const std::string &f : fontes) {
-			QAction *a = menu.addAction(escapar(f));
-			QObject::connect(a, &QAction::triggered, this, [adicionar, f] { adicionar(f); });
-		}
-		if (!cenas.empty()) {
-			if (!fontes.empty())
-				menu.addSeparator();
-			QMenu *sub = menu.addMenu(T("Cenas do OBS"));
-			for (const std::string &c : cenas) {
-				QAction *a = sub->addAction(escapar(c));
-				QObject::connect(a, &QAction::triggered, this, [adicionar, c] { adicionar(c); });
-			}
-		}
-		menu.exec(btnAdd->mapToGlobal(QPoint(0, btnAdd->height())));
+		QListWidgetItem *it = lista->currentItem();
+		return it ? it->data(Qt::UserRole).toLongLong() : 0;
 	}
 
-	void atualizar()
+	LinhaFonte *linhaAtual() const
 	{
-		vistaV = vertical_versao();
-		limparLayout(linhas);
-		std::string cena = ativaStd();
-		struct vertical_item itens[MAX_ITENS_UI];
-		size_t n = cena.empty() ? 0 : vertical_itens(cena.c_str(), itens, MAX_ITENS_UI);
-		btnAdd->setEnabled(!cena.empty());
-		int64_t sel = hub().selecionado();
+		QListWidgetItem *it = lista->currentItem();
+		return it ? static_cast<LinhaFonte *>(lista->itemWidget(it)) : nullptr;
+	}
 
-		if (n == 0) {
-			auto *l = criarLabel(this, "mut",
-					     cena.empty() ? T("Nenhuma cena vertical ativa.")
-							  : T("Cena vazia. Use + Adicionar fonte."));
-			l->setWordWrap(true);
-			linhas->addWidget(l);
+	bool editandoLinha() const
+	{
+		for (int i = 0; i < lista->count(); i++) {
+			auto *l = static_cast<LinhaFonte *>(lista->itemWidget(lista->item(i)));
+			if (l && l->editando())
+				return true;
 		}
+		return false;
+	}
 
-		/* Top item first, like OBS. */
-		for (size_t k = 0; k < n; k++) {
-			const vertical_item it = itens[n - 1 - k];
-			QHBoxLayout *h = nullptr;
-			auto *linha = new LinhaClicavel(this);
-			linha->setObjectName("linha");
-			h = new QHBoxLayout(linha);
-			h->setContentsMargins(6, 3, 6, 3);
-			h->setSpacing(4);
-			estiloLinha(linha, it.id == sel ? "#9146ff" : "#2a2a36");
-			linha->setCursor(Qt::PointingHandCursor);
+	void atualizarAcoes()
+	{
+		const bool tem = lista->currentItem() != nullptr;
+		aProps->setEnabled(tem);
+		aSobe->setEnabled(tem);
+		aDesce->setEnabled(tem);
+	}
 
-			auto *olho = new QPushButton(linha);
-			olho->setObjectName("olho");
-			olho->setIcon(iconeOlho(it.visivel));
-			olho->setIconSize(QSize(16, 16));
-			olho->setFocusPolicy(Qt::NoFocus);
-			olho->setCursor(Qt::PointingHandCursor);
-			olho->setToolTip(T(it.visivel ? "Ocultar" : "Mostrar").toHtmlEscaped());
-			auto *rotulo = new LabelElidido(linha, "nome");
-			rotulo->setCompleto(nomeUi(it.nome));
-			if (!it.visivel)
-				rotulo->setStyleSheet("color:#77778a;");
-			auto *sobe = criarMini(linha, QString::fromUtf8("▲"), T("Subir"));
-			auto *desce = criarMini(linha, QString::fromUtf8("▼"), T("Descer"));
-			auto *remove = criarMini(linha, QString::fromUtf8("✕"), T("Remover"));
-			sobe->setEnabled(k > 0);
-			desce->setEnabled(k + 1 < n);
+	void sincronizarSelecao()
+	{
+		const int64_t sel = hub().selecionado();
+		sincronizando = true;
+		lista->clearSelection();
+		lista->setCurrentItem(nullptr);
+		for (int i = 0; sel && i < lista->count(); i++) {
+			if (lista->item(i)->data(Qt::UserRole).toLongLong() == sel) {
+				lista->setCurrentRow(i);
+				break;
+			}
+		}
+		sincronizando = false;
+		atualizarAcoes();
+	}
 
-			h->addWidget(olho);
-			h->addWidget(rotulo, 1);
-			h->addWidget(sobe);
-			h->addWidget(desce);
-			h->addWidget(remove);
-			linhas->addWidget(linha);
+	void atualizar(bool forcar)
+	{
+		cena = ativaStd();
+		std::vector<vertical_item> v(MAX_ITENS_UI);
+		const size_t n = cena.empty() ? 0 : vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
+		QString sig = QString::fromUtf8(cena.c_str()) + QChar(0x1d);
+		for (size_t i = 0; i < n; i++)
+			sig += QString("%1\x1e%2\x1e%3\x1e%4\x1f").arg(v[i].id).arg(QString::fromUtf8(v[i].nome)).arg(v[i].visivel).arg(v[i].bloqueado);
+		if (!forcar && sig == vista) {
+			if (hub().selecionado() != idAtual())
+				sincronizarSelecao();
+			return;
+		}
+		vista = sig;
 
-			int64_t id = it.id;
-			int ordem = it.ordem;
-			bool vis = it.visivel;
-			QString nomeItem = nomeUi(it.nome);
-			linha->clique = [id] {
-				hub().selecionar(id);
-			};
-			QObject::connect(olho, &QPushButton::clicked, this, [this, cena, id, vis] {
-				const char *e = vertical_item_visivel(cena.c_str(), id, !vis);
-				if (e)
+		sincronizando = true;
+		lista->clear();
+		for (size_t k = n; k-- > 0;) { /* top item first, like OBS */
+			const vertical_item &it = v[k];
+			QIcon icone;
+			comFonte(it.nome, [&](obs_source_t *s) { icone = iconeFonte(obs_source_get_id(s)); });
+			if (icone.isNull())
+				icone = iconeProp("defaultIcon");
+			auto *item = new QListWidgetItem(lista);
+			item->setData(Qt::UserRole, qlonglong(it.id));
+			auto *linha = new LinhaFonte(it, icone, lista);
+			const int64_t id = it.id;
+			const std::string nome = it.nome;
+			linha->aoVisivel = [this, id](bool vis) {
+				if (const char *e = vertical_item_visivel(cena.c_str(), id, vis))
 					aviso(this, e);
-				atualizar();
-			});
-			QObject::connect(sobe, &QPushButton::clicked, this, [this, cena, id, ordem] {
-				vertical_item_ordem(cena.c_str(), id, ordem + 1);
-				atualizar();
-			});
-			QObject::connect(desce, &QPushButton::clicked, this, [this, cena, id, ordem] {
-				vertical_item_ordem(cena.c_str(), id, ordem - 1);
-				atualizar();
-			});
-			QObject::connect(remove, &QPushButton::clicked, this, [this, cena, id, nomeItem] {
-				QPointer<DockFontes> self(this);
-				QTimer::singleShot(0, this, [self, cena, id, nomeItem] {
-					if (!self)
-						return;
-					if (!confirmar(self, T("Remover fonte"),
-						       T("Remover \"%1\" desta cena vertical?").arg(nomeItem),
-						       T("Remover")))
-						return;
-					if (!self || ativaStd() != cena)
-						return;
-					std::vector<vertical_item> v(MAX_ITENS_UI);
-					const size_t n = vertical_itens(cena.c_str(), v.data(), MAX_ITENS_UI);
-					bool existe = false;
-					for (size_t i = 0; i < n; i++)
-						if (v[i].id == id)
-							existe = true;
-					if (!existe)
-						return;
-					vertical_item_remover(cena.c_str(), id);
-					if (hub().selecionado() == id)
-						hub().selecionar(0);
-					self->atualizar();
-				});
-			});
+				atualizar(false);
+			};
+			linha->aoBloquear = [this, id](bool bloq) {
+				if (const char *e = vertical_item_bloquear(cena.c_str(), id, bloq))
+					aviso(this, e);
+				atualizar(false);
+			};
+			linha->aoRenomear = [this, nome](const QString &novo) {
+				renomearFonte(this, QString::fromUtf8(nome.c_str()), novo);
+				atualizar(false);
+			};
+			item->setSizeHint(linha->sizeHint());
+			lista->setItemWidget(item, linha);
 		}
-		linhas->addStretch(1);
+		sincronizando = false;
+		sincronizarSelecao();
+	}
+
+	void renomear()
+	{
+		if (LinhaFonte *l = linhaAtual())
+			l->editar();
+	}
+
+	void remover()
+	{
+		const int64_t id = idAtual();
+		if (!id)
+			return;
+		QPointer<DockFontes> self(this);
+		const std::string c = cena;
+		QTimer::singleShot(0, this, [self, c, id] {
+			if (!self)
+				return;
+			removerFonte(self, c, id);
+			self->atualizar(true);
+		});
+	}
+
+	void propriedades()
+	{
+		QListWidgetItem *it = lista->currentItem();
+		if (!it)
+			return;
+		vertical_item item;
+		if (!acharItem(cena, idAtual(), item))
+			return;
+		comFonte(item.nome, [](obs_source_t *s) {
+			if (obs_source_configurable(s))
+				obs_frontend_open_source_properties(s);
+		});
+	}
+
+	void mover(Ordem modo)
+	{
+		const int64_t id = idAtual();
+		if (!id)
+			return;
+		moverItem(cena, id, modo);
+		atualizar(false);
 	}
 };
 

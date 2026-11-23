@@ -77,6 +77,12 @@ const char *vertical_cena_criar(const char *nome);
 const char *vertical_cena_renomear(const char *nome, const char *novo);
 const char *vertical_cena_remover(const char *nome);
 const char *vertical_cena_ativar(const char *nome);
+/* New scene `novo` with the same items as `nome` (same sources referenced, transform/crop/visibility/lock/
+ * scale filter/blending copied), like OBS "Duplicate" with OBS_SCENE_DUP_REFS. */
+const char *vertical_cena_duplicar(const char *nome, const char *novo);
+/* Moves scene `nome` to the absolute index `posicao` (clamped) in the user order that vertical_cenas_listar
+ * returns; the order is saved with the collection. */
+const char *vertical_cena_mover(const char *nome, int posicao);
 /* Link vertical scene <- main scene. Fills dst with the first main scene linked to `vnome` ("" when none). */
 void vertical_ligacao_obter(const char *vnome, char *dst, size_t n);
 /* Links `principal` to `vnome` (removing any other main scene linked to it); "" principal just unlinks. */
@@ -98,6 +104,9 @@ struct vertical_item {
 size_t vertical_itens(const char *cena, struct vertical_item *out, size_t max);
 const char *vertical_item_adicionar(const char *cena, const char *fonte, int64_t *id);
 const char *vertical_item_visivel(const char *cena, int64_t id, bool visivel);
+const char *vertical_item_bloquear(const char *cena, int64_t id, bool bloqueado);
+/* Referenced scene item (obs_sceneitem_addref), release with obs_sceneitem_release. NULL when not found. */
+obs_sceneitem_t *vertical_item_ref(const char *cena, int64_t id);
 const char *vertical_item_ordem(const char *cena, int64_t id, int posicao);
 const char *vertical_item_remover(const char *cena, int64_t id);
 /* Applies transform + crop with deferred update (no version bump / save: used while dragging). */
