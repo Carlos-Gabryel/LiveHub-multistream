@@ -85,9 +85,31 @@ recording. Scene collection backup: `F:\Backups\obs-studio-20261122-2214`.
 - Self-test (st2): scene item/empty menus and the Order, Projector and Transition override submenus are identical to OBS's (the unordered_map
   order of the transitions also matches); only differences are the Impossible item below and the LiveHub link entry.
 
+### Task C (2026-11-22): Preview dock
+- `src/obsport/`: `LHQTDisplay` (OBSQTDisplay), `LHPreview` (OBSBasicPreview, line-for-line: overlay, multi-select, rubber band, hover,
+  crop/rotate/stretch/snap with the user's OBS settings, spacing helpers, overflow settings, zoom/scroll/space+middle pan, lock, scrollbars,
+  nudge keys), `LHPreviewDock` + `LHPreviewDockOBS.cpp` (canvasEditor/contextContainer of OBSBasic.ui via `forms/LHPreviewDock.ui`,
+  OBSBasic_Preview.cpp: RenderMain/ResizePreview/scaling menu/Enable Preview/Lock, OBSBasic_ContextToolbar.cpp), `OBSPreviewScalingComboBox/Label`,
+  `SourceToolbar` + Color/Image/Text/Browser/Game/Device/Display/Window/Audio/AppAudio toolbars + `MediaControls` (all ported), `LHDisplayHelpers.hpp`.
+- Preview menu = `LHSourcesDock::CreateSourcePopupMenu(idx, preview=true)` (same function as the Sources menu; preview-only entries: Enable Preview,
+  Lock Preview, Preview Scaling submenu, Preview Projector submenu, Screenshot (Preview)). `LHProjector::OpenPreview` = OBS "Preview" projector
+  (renders the canvas output texture).
+- Settings that OBS keeps per main preview use our own keys in the user config (`LHVPreviewEnabled/Locked/ScalingEnabled/ScalingLevel/ScrollX/ScrollY`);
+  the ShowContextToolbars / ShowSafeAreas / SpacingHelpersEnabled / Overflow* / Accessibility colours / snapping settings of OBS are honoured as-is.
+- The preview follows `vertical_ui_hook_*`: display + GPU objects are destroyed (display first) before the canvas teardown; the graphics thread only reads
+  cached state (canvas info, scene) - no engine lock, no Qt.
+- vdocks.cpp: old Hub/Visor/DockPreview and the hand-written menus/dialogs/helpers removed (3000 -> ~250 lines); only the LiveHub "Transmitir vertical"
+  button (footer under the context bar) and the dock registration remain.
+- Self-test (st3): `lhms_*` sections for preview area, zoom bar, context bar and the preview menus (item + empty, all submenus). Empty-area menu identical
+  to OBS; item menu identical except source-type dependent entries (the two scenes' first items differ), the lock/zoom state (own keys) and the Impossible
+  entry below. `LHMS_SELFTEST_SELECT=1` leaves the first item selected (to look at the overlay/context bar with a window screenshot).
+- OBS has no double-click handler in the preview (QWidget default = a second press), so none was added.
+
 ## Impossible for a non-main canvas
 - "Resize output (source size)" (ResizeOutputSizeOfSource): resizes the main video/output; the vertical canvas is fixed 1080x1920.
 - "Show in Multiview" (scene context menu): OBS's multiview only draws main-canvas scenes; the vertical scenes cannot be added to it.
 - Scene projector: obs_frontend_open_projector cannot find canvas scenes, so `LHProjector` renders the vertical scene itself; it is not
   saved/restored with OBS's saved projectors (OBS only stores projectors of its own scenes).
 - Settings edits of OBS's current transition (properties dialog) are picked up at the next scene event, not instantly (no frontend event).
+- "Resize output (source size)" in the preview item menu (same entry as the Sources menu, see above).
+- Preview/Program labels, Studio Mode preview (`IsPreviewProgramMode`) and the Multiview: the vertical canvas has no Studio Mode.

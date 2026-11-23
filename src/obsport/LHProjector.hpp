@@ -38,6 +38,8 @@ class LHProjector : public QWidget {
 	bool isAlwaysOnTopOverridden = false;
 	int savedMonitor = -1;
 	bool ready = false;
+	bool previewMode = false; /* "Preview" projector: renders the canvas output texture (OBS ProjectorType::Preview) */
+	obs_canvas_t *canvas_ = nullptr;
 
 	void UpdateProjectorTitle(QString name);
 	void CreateDisplay();
@@ -57,7 +59,7 @@ private slots:
 
 public:
 	/* monitor -1 = windowed. */
-	LHProjector(obs_source_t *source, int monitor);
+	LHProjector(obs_source_t *source, int monitor, obs_canvas_t *previewCanvas = nullptr);
 	~LHProjector();
 
 	OBSSource GetSource();
@@ -68,6 +70,8 @@ public:
 
 	/* Opens a projector for a vertical scene. */
 	static LHProjector *Open(obs_source_t *scene, int monitor);
+	/* OBS ProjectorType::Preview of the vertical canvas (monitor -1 = windowed). */
+	static LHProjector *OpenPreview(int monitor);
 	/* Closes all projectors (canvas teardown / plugin unload). */
 	static void CloseAll();
 };

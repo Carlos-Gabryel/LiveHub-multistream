@@ -8,6 +8,7 @@
 
 #include "LHSourcesDock.hpp"
 #include "LHColorSelect.hpp"
+#include "LHPreviewDock.hpp"
 
 #include <QGuiApplication>
 #include <QPushButton>
@@ -408,8 +409,10 @@ void LHSourcesDock::AddProjectorMenuMonitors(QMenu *parent, const std::function<
 	}
 }
 
-void LHSourcesDock::CreateSourcePopupMenu(int idx)
+void LHSourcesDock::CreateSourcePopupMenu(int idx, bool preview)
 {
+	LHPreviewDock *previewDock = preview ? LHPreviewDock::Get() : nullptr;
+
 	QMenu popup(this);
 
 	OBSSceneItem sceneItem;
@@ -435,13 +438,38 @@ void LHSourcesDock::CreateSourcePopupMenu(int idx)
 	popup.addAction(addSource);
 	popup.addSeparator();
 
-	if (!sourceSelected) {
+	if (!preview && !sourceSelected) {
 		QAction *addGroup = new QAction(QTStr("Basic.Main.NewGroup"), this);
 		connect(addGroup, &QAction::triggered, sources, &SourceTree::AddGroup);
 		popup.addAction(addGroup);
 	}
 
+	// Preview menu entries
+	if (preview && previewDock) {
+		QAction *action = popup.addAction(QTStr("Basic.Main.PreviewConextMenu.Enable"), previewDock,
+						  &LHPreviewDock::TogglePreview);
+		action->setCheckable(true);
+		action->setChecked(previewDock->Preview()->GetDisplay() &&
+				   obs_display_enabled(previewDock->Preview()->GetDisplay()));
+
+		popup.addAction(previewDock->actionLockPreview);
+		popup.addMenu(previewDock->scalingMenu);
+
+		popup.addSeparator();
+	}
+
 	// Projector menu entries
+	if (preview && previewDock) {
+		QMenu *previewProjectorSource = new QMenu(QTStr("Projector.Open.Preview"), &popup);
+		AddProjectorMenuMonitors(previewProjectorSource,
+					 [previewDock](int monitor) { previewDock->OpenPreviewProjector(monitor); });
+		previewProjectorSource->addSeparator();
+		previewProjectorSource->addAction(QTStr("Projector.Window"), previewDock,
+						  &LHPreviewDock::OpenPreviewWindow);
+
+		popup.addMenu(previewProjectorSource);
+	}
+
 	if (hasVideo) {
 		QMenu *sourceProjector = new QMenu(QTStr("Projector.Open.Source"), &popup);
 		const std::string srcName = obs_source_get_name(source);
@@ -459,6 +487,10 @@ void LHSourcesDock::CreateSourcePopupMenu(int idx)
 	popup.addSeparator();
 
 	// Screenshot menu entries
+	if (preview && previewDock) {
+		popup.addAction(QTStr("Screenshot.Preview"), previewDock, &LHPreviewDock::ScreenshotScene);
+	}
+
 	if (hasVideo) {
 		popup.addAction(QTStr("Screenshot.Source"), this, [this]() {
 			OBSSceneItem item = GetCurrentSceneItem();
@@ -475,27 +507,30 @@ void LHSourcesDock::CreateSourcePopupMenu(int idx)
 
 	if (sourceSelected) {
 		// Sources list menu entries
-		QMenu *colorMenu = new QMenu(QTStr("ChangeBG"), &popup);
-		QWidgetAction *colorWidgetAction = new QWidgetAction(colorMenu);
-		LHColorSelect *colorSelect = new LHColorSelect(colorMenu);
-		popup.addMenu(AddBackgroundColorMenu(colorMenu, colorWidgetAction, colorSelect, sceneItem));
+		if (!preview) {
+			QMenu *colorMenu = new QMenu(QTStr("ChangeBG"), &popup);
+			QWidgetAction *colorWidgetAction = new QWidgetAction(colorMenu);
+			LHColorSelect *colorSelect = new LHColorSelect(colorMenu);
+			popup.addMenu(AddBackgroundColorMenu(colorMenu, colorWidgetAction, colorSelect, sceneItem));
 
-		if (hasAudio) {
-			bool isHidden = isHiddenInMixer(source);
+			if (hasAudio) {
+				bool isHidden = isHiddenInMixer(source);
 
-			QAction *actionHideMixer = popup.addAction(QTStr("HideMixer"), this, [source, isHidden]() {
-				setHiddenInMixer(source, !isHidden);
+				QAction *actionHideMixer = popup.addAction(QTStr("HideMixer"), this, [source, isHidden]() {
+					setHiddenInMixer(source, !isHidden);
 
-				/* OBSBasic::mixerStatusChanged: the main window refreshes its mixer */
-				if (QWidget *mw = VerticalContext::Get()->MainWindow()) {
-					QMetaObject::invokeMethod(mw, "mixerStatusChanged", Qt::DirectConnection,
-								  Q_ARG(QString, QString::fromUtf8(obs_source_get_uuid(source))));
-				}
-			});
-			actionHideMixer->setCheckable(true);
-			actionHideMixer->setChecked(isHidden);
+					/* OBSBasic::mixerStatusChanged: the main window refreshes its mixer */
+					if (QWidget *mw = VerticalContext::Get()->MainWindow()) {
+						QMetaObject::invokeMethod(
+							mw, "mixerStatusChanged", Qt::DirectConnection,
+							Q_ARG(QString, QString::fromUtf8(obs_source_get_uuid(source))));
+					}
+				});
+				actionHideMixer->setCheckable(true);
+				actionHideMixer->setChecked(isHidden);
+			}
+			popup.addSeparator();
 		}
-		popup.addSeparator();
 
 		// Scene item menu entries
 		if (hasVideo && source) {

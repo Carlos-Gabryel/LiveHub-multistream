@@ -21,6 +21,7 @@ with this program. If not, see <https://www.gnu.org/licenses/>
  * <dir>/menus.txt with the text tree of every menu. See docs/paridade-obs.md. */
 
 #include "selftest.hpp"
+#include "obsport/LHPreviewDock.hpp"
 
 #include <obs-frontend-api.h>
 #include <plugin-support.h>
@@ -200,15 +201,30 @@ void pedirMenuContexto(QWidget *w, const QPoint &pos)
 	QMetaObject::invokeMethod(w, "customContextMenuRequested", Qt::DirectConnection, Q_ARG(QPoint, pos));
 }
 
+/* findChild of the OBS main window that skips our own preview dock (it reuses OBS's object names) */
+QWidget *acharObs(QMainWindow *mw, const char *nome)
+{
+	QWidget *nosso = lhms_vdocks_widget("preview");
+	for (QWidget *w : mw->findChildren<QWidget *>(nome)) {
+		bool nossoFilho = false;
+		for (QWidget *p = w; p; p = p->parentWidget())
+			if (p == nosso)
+				nossoFilho = true;
+		if (!nossoFilho)
+			return w;
+	}
+	return nullptr;
+}
+
 void testeObs(QMainWindow *mw)
 {
 	QWidget *scenesDock = mw->findChild<QWidget *>("scenesDock");
 	QWidget *sourcesDock = mw->findChild<QWidget *>("sourcesDock");
 	gravarImagem(scenesDock, "obs_scenes_dock");
 	gravarImagem(sourcesDock, "obs_sources_dock");
-	gravarImagem(mw->findChild<QWidget *>("canvasEditor"), "obs_preview_area");
-	gravarImagem(mw->findChild<QWidget *>("previewXContainer"), "obs_preview_zoombar");
-	gravarImagem(mw->findChild<QWidget *>("contextContainer"), "obs_preview_contextbar");
+	gravarImagem(acharObs(mw, "canvasEditor"), "obs_preview_area");
+	gravarImagem(acharObs(mw, "previewXContainer"), "obs_preview_zoombar");
+	gravarImagem(acharObs(mw, "contextContainer"), "obs_preview_contextbar");
 
 	/* our Sources dock also has a list named "sources": take the one inside OBS's sourcesDock */
 	QAbstractItemView *sources = nullptr;
@@ -223,7 +239,9 @@ void testeObs(QMainWindow *mw)
 			break;
 	}
 	auto *scenes = mw->findChild<QAbstractItemView *>("scenes");
-	QWidget *preview = mw->findChild<QWidget *>("preview");
+	obs_log(LOG_INFO, "[LHMS selftest] obs sources=%s scenes=%s", sources ? sources->metaObject()->className() : "-", scenes ? scenes->metaObject()->className() : "-");
+	QWidget *preview = acharObs(mw, "preview");
+	obs_log(LOG_INFO, "[LHMS selftest] obs preview=%s", preview ? preview->metaObject()->className() : "-");
 
 	if (sources) {
 		const SelSalva salva = salvarSelecao(sources);
@@ -242,6 +260,8 @@ void testeObs(QMainWindow *mw)
 		capturarMenu("obs_sources_empty", [&] {
 			pedirMenuContexto(sources, QPoint(sources->viewport()->width() - 2, sources->viewport()->height() - 2));
 		});
+		if (preview)
+			capturarMenu("obs_preview_empty", [&] { pedirMenuContexto(preview, QPoint(5, 5)); });
 		restaurarSelecao(sources, salva);
 	}
 	if (scenes) {
@@ -264,7 +284,14 @@ void testeNosso(QMainWindow *mw)
 	for (int i = 0; i < 3; i++)
 		grabarDockOuConteudo(mw, ids[i], w[i], nomes[i]);
 
-	static const char *menus[][2] = {{"preview", "lh_preview_item"},
+	if (auto *pd = dynamic_cast<LHPreviewDock *>(w[0])) {
+		gravarImagem(pd->findChild<QWidget *>("canvasEditor"), "lh_preview_area");
+		gravarImagem(pd->findChild<QWidget *>("previewXContainer"), "lh_preview_zoombar");
+		gravarImagem(pd->findChild<QWidget *>("contextContainer"), "lh_preview_contextbar");
+	}
+
+	static const char *menus[][2] = {{"preview_item", "lh_preview_item"},
+					 {"preview_empty", "lh_preview_empty"},
 					 {"scenes_item", "lh_scenes_item"},
 					 {"scenes_empty", "lh_scenes_empty"},
 					 {"sources_item", "lh_sources_item"},
@@ -291,6 +318,8 @@ void executar()
 	} catch (...) {
 		obs_log(LOG_WARNING, "[LHMS selftest] exception");
 	}
+	if (qEnvironmentVariableIsSet("LHMS_SELFTEST_SELECT"))
+		lhms_vdocks_selftest_menu("select_first");
 	QFile f(s_dir + "/menus.txt");
 	if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
 		f.write(s_texto.toUtf8());

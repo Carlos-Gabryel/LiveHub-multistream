@@ -140,6 +140,19 @@ LHProjector *LHProjector::Open(obs_source_t *scene, int monitor)
 	return p;
 }
 
+LHProjector *LHProjector::OpenPreview(int monitor)
+{
+	OBSSourceAutoRelease scene = vertical_cena_ativa_ref();
+	if (!scene)
+		return nullptr;
+	obs_canvas_t *canvas = vertical_canvas_ref();
+	if (!canvas)
+		return nullptr;
+	auto *p = new LHProjector(scene, monitor, canvas);
+	projectors().append(p);
+	return p;
+}
+
 void LHProjector::CloseAll()
 {
 	const auto copia = projectors();
@@ -149,10 +162,14 @@ void LHProjector::CloseAll()
 	projectors().clear();
 }
 
-LHProjector::LHProjector(obs_source_t *source_, int monitor)
+LHProjector::LHProjector(obs_source_t *source_, int monitor, obs_canvas_t *previewCanvas)
 	: QWidget(nullptr, Qt::Window),
 	  weakSource(OBSGetWeakRef(source_))
 {
+	if (previewCanvas) {
+		previewMode = true;
+		canvas_ = previewCanvas;
+	}
 	setAttribute(Qt::WA_PaintOnScreen);
 	setAttribute(Qt::WA_StaticContents);
 	setAttribute(Qt::WA_NoSystemBackground);
@@ -227,6 +244,10 @@ LHProjector::~LHProjector()
 	OBSSource source = GetSource();
 	if (source) {
 		obs_source_dec_showing(source);
+	}
+	if (canvas_) {
+		obs_canvas_release(canvas_);
+		canvas_ = nullptr;
 	}
 	projectors().removeAll(this);
 }
@@ -350,7 +371,9 @@ void LHProjector::OBSRender(void *data, uint32_t cx, uint32_t cy)
 
 	startRegion(x, y, newCX, newCY, 0.0f, float(targetCX), 0.0f, float(targetCY));
 
-	if (source) {
+	if (window->previewMode && window->canvas_) {
+		obs_render_canvas_texture(window->canvas_);
+	} else if (source) {
 		obs_source_video_render(source);
 	}
 
@@ -416,7 +439,10 @@ void LHProjector::EscapeTriggered()
 
 void LHProjector::UpdateProjectorTitle(QString name)
 {
-	setWindowTitle(QTStr("Projector.Title") + " - " + QTStr("Projector.Title.Scene").arg(name));
+	if (previewMode)
+		setWindowTitle(QTStr("Projector.Title") + " - " + QTStr("StudioMode.Preview"));
+	else
+		setWindowTitle(QTStr("Projector.Title") + " - " + QTStr("Projector.Title.Scene").arg(name));
 }
 
 OBSSource LHProjector::GetSource()

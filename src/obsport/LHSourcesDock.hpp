@@ -33,8 +33,15 @@ public:
 	/* OBSBasic::GetProjectorMenuMonitorsFormatted (also used by the Scenes dock and the projector). */
 	static QList<QString> GetProjectorMenuMonitorsFormatted();
 
+	/* The preview dock: menu of the preview (CreateSourcePopupMenu(preview = true)) and the keys of the sources
+	 * while the preview has the focus. */
+	void PreviewContextMenu();
+	bool HandleShortcut(QKeyEvent *ke, bool shortcutOverride);
+
 	/* LHMS_SELFTEST: blocking menu (QMenu::exec) of an item / of the empty area. */
-	void SelftestMenu(bool item);
+	void SelftestMenu(bool item, bool preview = false);
+	/* LHMS_SELFTEST_SELECT: leaves the first item selected (to inspect the preview overlay). */
+	void SelftestSelectFirst();
 
 protected:
 	bool eventFilter(QObject *object, QEvent *event) override;
@@ -87,7 +94,7 @@ private:
 	OBSSceneItem GetCurrentSceneItem();
 
 	bool QueryRemoveSource(obs_source_t *source);
-	void CreateSourcePopupMenu(int idx);
+	void CreateSourcePopupMenu(int idx, bool preview = false);
 	void ColorChangeFrom(QObject *sender);
 
 	QMenu *AddDeinterlacingMenu(QMenu *menu, obs_source_t *source);

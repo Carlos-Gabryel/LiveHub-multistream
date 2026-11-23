@@ -20,6 +20,7 @@
 #include <vector>
 
 class SourceTree;
+class LHSourcesDock;
 
 /* obs_source_load_state (libobs 32+), resolved at runtime; 1 (enabled) when unavailable. */
 int lhv_source_load_state(const char *id);
@@ -38,6 +39,9 @@ public:
 	void SetCurrentScene(obs_source_t *scene, bool force = false);
 	/* Canvas of the vertical scenes (video info for fit/stretch/center). */
 	bool GetCanvasVideoInfo(obs_video_info *ovi);
+
+	/* The Sources dock (the preview menu/toolbar use its actions). */
+	LHSourcesDock *sourcesDock = nullptr;
 
 	/* Selected scene items of the current scene (libobs selection). */
 	SourceTree *tree = nullptr;
@@ -64,7 +68,13 @@ public:
 	void CreateSceneUndoRedoAction(const QString &action_name, OBSData undo_data, OBSData redo_data);
 
 	/* Things OBSBasic does that do not apply (or are handled elsewhere) here. */
-	void UpdateContextBarDeferred() {}
+	/* The context toolbar of the preview dock (OBSBasic::UpdateContextBarDeferred). */
+	void UpdateContextBarDeferred(bool force = false)
+	{
+		if (updateContextBar)
+			updateContextBar(force);
+	}
+	std::function<void(bool)> updateContextBar;
 	void UpdateEditMenu()
 	{
 		if (updateEditMenu)

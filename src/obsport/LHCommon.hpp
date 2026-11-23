@@ -11,8 +11,13 @@
 #pragma once
 
 #include <obs.hpp>
+#include <util/config-file.h>
+#include <util/dstr.hpp>
 #include <obs-frontend-api.h>
 
+#include <QComboBox>
+#include <QFileDialog>
+#include <QStandardItemModel>
 #include <QAbstractButton>
 #include <QCheckBox>
 #include <QColor>
@@ -31,6 +36,9 @@
 
 #include <string>
 
+/* obs.hpp of OBS 32+ (the 31.1.1 SDK has no OBSProperties) */
+using OBSProperties = OBSPtr<obs_properties_t *, obs_properties_destroy>;
+
 /* OBS's own locale strings (same keys as OBS's Str()/QTStr()). */
 inline const char *Str(const char *lookupVal)
 {
@@ -40,6 +48,19 @@ inline const char *Str(const char *lookupVal)
 inline QString QTStr(const char *lookupVal)
 {
 	return QString::fromUtf8(obs_frontend_get_locale_string(lookupVal));
+}
+
+/* qt-wrappers.cpp */
+inline void SetComboItemEnabled(QComboBox *c, int idx, bool enabled)
+{
+	QStandardItemModel *model = dynamic_cast<QStandardItemModel *>(c->model());
+	QStandardItem *item = model->item(idx);
+	item->setFlags(enabled ? Qt::ItemIsSelectable | Qt::ItemIsEnabled : Qt::NoItemFlags);
+}
+
+inline QString OpenFile(QWidget *parent, QString title, QString path, QString extensions)
+{
+	return QFileDialog::getOpenFileName(parent, title, path, extensions);
 }
 
 #define QT_UTF8(str) QString::fromUtf8(str)

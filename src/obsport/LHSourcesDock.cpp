@@ -122,6 +122,7 @@ LHSourcesDock::LHSourcesDock(QWidget *parent) : QWidget(parent)
 			sources->SetIconsVisible(false);
 	}
 
+	VerticalContext::Get()->sourcesDock = this;
 	vertical_ui_hook_adicionar(&LHSourcesDock::AoDesmontar, this);
 
 	pollTimer = new QTimer(this);
@@ -140,6 +141,8 @@ LHSourcesDock::~LHSourcesDock()
 	vertical_ui_hook_remover(&LHSourcesDock::AoDesmontar, this);
 	sceneSignals.clear();
 	VerticalContext *ctx = VerticalContext::Get();
+	if (ctx->sourcesDock == this)
+		ctx->sourcesDock = nullptr;
 	if (ctx->tree == sources) {
 		ctx->tree = nullptr;
 		ctx->updateEditMenu = nullptr;
@@ -305,39 +308,58 @@ void LHSourcesDock::CreateActions()
 	}
 }
 
+bool LHSourcesDock::HandleShortcut(QKeyEvent *ke, bool shortcutOverride)
+{
+	const QKeySequence ks(QKeyCombination(ke->modifiers() & ~Qt::KeypadModifier, Qt::Key(ke->key())));
+	for (QAction *a : shortcutActions) {
+		if (a->shortcut() != ks) {
+			continue;
+		}
+		if (shortcutOverride) {
+			return true;
+		}
+		if (a->isEnabled()) {
+			a->trigger();
+		}
+		return true;
+	}
+	return false;
+}
+
 bool LHSourcesDock::eventFilter(QObject *object, QEvent *event)
 {
 	if (object == sources && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress)) {
-		QKeyEvent *ke = static_cast<QKeyEvent *>(event);
-		const QKeySequence ks(QKeyCombination(ke->modifiers() & ~Qt::KeypadModifier, Qt::Key(ke->key())));
-		for (QAction *a : shortcutActions) {
-			if (a->shortcut() != ks) {
-				continue;
-			}
-			if (event->type() == QEvent::ShortcutOverride) {
-				event->accept();
-				return true;
-			}
-			if (a->isEnabled()) {
-				a->trigger();
-			}
+		if (HandleShortcut(static_cast<QKeyEvent *>(event), event->type() == QEvent::ShortcutOverride)) {
+			event->accept();
 			return true;
 		}
 	}
 	return QWidget::eventFilter(object, event);
 }
 
-void LHSourcesDock::SelftestMenu(bool item)
+void LHSourcesDock::PreviewContextMenu()
+{
+	CreateSourcePopupMenu(GetTopSelectedSourceItem(), true);
+}
+
+void LHSourcesDock::SelftestSelectFirst()
+{
+	const QModelIndex i0 = sources->model()->index(0, 0);
+	if (i0.isValid())
+		sources->selectionModel()->select(i0, QItemSelectionModel::ClearAndSelect);
+}
+
+void LHSourcesDock::SelftestMenu(bool item, bool preview)
 {
 	if (item) {
 		const QModelIndex i0 = sources->model()->index(0, 0);
 		if (i0.isValid()) {
 			sources->selectionModel()->select(i0, QItemSelectionModel::ClearAndSelect);
-			CreateSourcePopupMenu(0);
+			CreateSourcePopupMenu(0, preview);
 		}
 	} else {
 		sources->selectionModel()->clearSelection();
-		CreateSourcePopupMenu(-1);
+		CreateSourcePopupMenu(-1, preview);
 	}
 }
 
