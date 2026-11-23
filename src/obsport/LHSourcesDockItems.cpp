@@ -614,7 +614,7 @@ void LHSourcesDock::on_actionCopyFilters_triggered()
 
 	OBSSource source = obs_sceneitem_get_source(item);
 
-	copyFiltersSource_ = obs_source_get_weak_source(source);
+	VerticalContext::Get()->copyFiltersSource = obs_source_get_weak_source(source);
 
 	actionPasteFilters->setEnabled(true);
 }
@@ -645,7 +645,7 @@ void LHSourcesDock::CreateFilterPasteUndoRedoAction(const QString &text, obs_sou
 
 void LHSourcesDock::on_actionPasteFilters_triggered()
 {
-	OBSSourceAutoRelease source = obs_weak_source_get_source(copyFiltersSource_);
+	OBSSourceAutoRelease source = obs_weak_source_get_source(VerticalContext::Get()->copyFiltersSource);
 
 	OBSSceneItem sceneItem = GetCurrentSceneItem();
 	OBSSource dstSource = obs_sceneitem_get_source(sceneItem);

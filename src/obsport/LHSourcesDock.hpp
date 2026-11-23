@@ -30,6 +30,9 @@ public:
 
 	SourceTree *Tree() const { return sources; }
 
+	/* OBSBasic::GetProjectorMenuMonitorsFormatted (also used by the Scenes dock and the projector). */
+	static QList<QString> GetProjectorMenuMonitorsFormatted();
+
 	/* LHMS_SELFTEST: blocking menu (QMenu::exec) of an item / of the empty area. */
 	void SelftestMenu(bool item);
 
@@ -66,7 +69,6 @@ private:
 	obs_transform_info copiedTransformInfo = {};
 	obs_sceneitem_crop copiedCropInfo = {};
 	bool hasCopiedTransform = false;
-	OBSWeakSource copyFiltersSource_;
 
 	QPointer<LHSourceSelect> addWindow;
 
@@ -97,7 +99,6 @@ private:
 	QMenu *CreateVisibilityTransitionMenu(QMenu *parent, bool visible);
 	void PasteShowHideTransition(obs_sceneitem_t *item, bool show, obs_source_t *tr, int duration);
 	void AddProjectorMenuMonitors(QMenu *parent, const std::function<void(int)> &open);
-	static QList<QString> GetProjectorMenuMonitorsFormatted();
 
 	void SetDeinterlacingMode(QAction *action);
 	void SetDeinterlacingOrder(QAction *action);

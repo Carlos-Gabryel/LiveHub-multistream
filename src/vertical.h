@@ -80,12 +80,19 @@ const char *vertical_cena_criar(const char *nome);
 const char *vertical_cena_renomear(const char *nome, const char *novo);
 const char *vertical_cena_remover(const char *nome);
 const char *vertical_cena_ativar(const char *nome);
+/* Same without the transition (OBS "force" scene change: undo/redo, duplicate). */
+const char *vertical_cena_ativar_cortando(const char *nome);
 /* New scene `novo` with the same items as `nome` (same sources referenced, transform/crop/visibility/lock/
  * scale filter/blending copied), like OBS "Duplicate" with OBS_SCENE_DUP_REFS. */
 const char *vertical_cena_duplicar(const char *nome, const char *novo);
 /* Moves scene `nome` to the absolute index `posicao` (clamped) in the user order that vertical_cenas_listar
  * returns; the order is saved with the collection. */
 const char *vertical_cena_mover(const char *nome, int posicao);
+/* Re-creates a scene saved with obs_save_source() (undo of a removal) at position `indice` and activates it. The
+ * sources used by its items must already exist. Returns NULL or a protocol error. */
+const char *vertical_cena_restaurar(obs_data_t *dados, int indice);
+/* UI thread: re-reads the transitions of the frontend (called on the events that change them). */
+void vertical_transicoes_atualizar(void);
 /* Link vertical scene <- main scene. Fills dst with the first main scene linked to `vnome` ("" when none). */
 void vertical_ligacao_obter(const char *vnome, char *dst, size_t n);
 /* Links `principal` to `vnome` (removing any other main scene linked to it); "" principal just unlinks. */

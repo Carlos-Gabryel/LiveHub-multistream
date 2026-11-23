@@ -88,6 +88,7 @@ public:
 	QIcon GetCustomIcon(const char *id) const;
 
 	/* Transition copy/paste state of the "Show/Hide Transition" menus. */
+	OBSWeakSource copyFiltersSource; /* shared by the Sources and Scenes docks, like OBSBasic::copyFiltersSource_ */
 	OBSWeakSource copySourceTransition;
 	int copySourceTransitionDuration = 0;
 

@@ -89,6 +89,21 @@ static struct {
 
 static void ordem_sync(obs_canvas_t *c);
 
+/* ---------- transitions (Task B) ----------
+ * Channel 0 of the canvas holds a PRIVATE transition (same type/settings as OBS's current transition, or the
+ * per-scene override), so switching scenes animates like OBS. s_ativa_w tracks the target scene (the channel
+ * holds the transition, not the scene). s_trcfg (guarded by s_vlock) is a snapshot of the frontend transitions
+ * taken on the UI thread (events): {atual, duracao, lista:[{id,name,settings}]}. The private instances are
+ * created/updated lazily when a scene is activated. */
+static obs_data_t *s_trcfg = NULL;
+static obs_source_t *s_tr = NULL;    /* private copy of OBS's current transition */
+static obs_source_t *s_tr_ov = NULL; /* private copy of the per-scene override transition in use */
+static char *s_tr_json = NULL, *s_tr_ov_json = NULL;
+static obs_weak_source_t *s_ativa_w = NULL;
+#define DURACAO_PADRAO 300
+
+static void bump(void);
+
 static void bump(void)
 {
 	os_atomic_inc_long(&s_versao);
@@ -175,15 +190,195 @@ static int contar_cenas(void)
 	return n;
 }
 
-/* Copies the name of the scene on channel 0 (caller holds s_vlock with a canvas). */
+/* Referenced active (target) scene or NULL (caller holds s_vlock). */
+static obs_source_t *ativa_get(void)
+{
+	return s_ativa_w ? obs_weak_source_get_source(s_ativa_w) : NULL;
+}
+
+static void ativa_set(obs_source_t *scene)
+{
+	obs_weak_source_t *novo = scene ? obs_source_get_weak_source(scene) : NULL;
+	obs_weak_source_release(s_ativa_w);
+	s_ativa_w = novo;
+}
+
+/* Copies the name of the active scene (caller holds s_vlock with a canvas). */
 static void nome_ativa(obs_canvas_t *c, char *dst, size_t n)
 {
+	UNUSED_PARAMETER(c);
 	dst[0] = 0;
-	obs_source_t *src = obs_canvas_get_channel(c, 0);
+	obs_source_t *src = ativa_get();
 	if (src) {
 		snprintf(dst, n, "%s", obs_source_get_name(src));
 		obs_source_release(src);
 	}
+}
+
+static bool tr_ativa(obs_source_t *t)
+{
+	if (!t)
+		return false;
+	float v = obs_transition_get_time(t);
+	return v > 0.0f && v < 1.0f;
+}
+
+/* Finds the frontend transition `nome` ("" = the current one) in the snapshot; returns the item (release). */
+static obs_data_t *tr_item(const char *nome)
+{
+	if (!s_trcfg)
+		return NULL;
+	if (!nome || !*nome)
+		nome = obs_data_get_string(s_trcfg, "atual");
+	if (!*nome)
+		return NULL;
+	obs_data_t *r = NULL;
+	obs_data_array_t *lista = obs_data_get_array(s_trcfg, "lista");
+	size_t n = obs_data_array_count(lista);
+	for (size_t i = 0; i < n && !r; i++) {
+		obs_data_t *it = obs_data_array_item(lista, i);
+		if (strcmp(obs_data_get_string(it, "name"), nome) == 0)
+			r = it;
+		else
+			obs_data_release(it);
+	}
+	obs_data_array_release(lista);
+	return r;
+}
+
+/* Returns the cached private transition for `item` (created/updated when the type or settings changed). */
+static obs_source_t *tr_obter(obs_source_t **slot, char **json_slot, obs_data_t *item)
+{
+	const char *id = obs_data_get_string(item, "id");
+	obs_data_t *st = obs_data_get_obj(item, "settings");
+	const char *js = obs_data_get_json(st);
+	if (*slot && strcmp(obs_source_get_id(*slot), id) != 0) {
+		obs_transition_clear(*slot);
+		obs_source_release(*slot);
+		*slot = NULL;
+	}
+	if (!*slot) {
+		*slot = obs_source_create_private(id, obs_data_get_string(item, "name"), st);
+		if (*slot) {
+			obs_transition_set_size(*slot, V_LARGURA, V_ALTURA);
+			obs_transition_set_alignment(*slot, OBS_ALIGN_CENTER);
+			obs_transition_set_scale_type(*slot, OBS_TRANSITION_SCALE_ASPECT);
+		}
+		bfree(*json_slot);
+		*json_slot = *slot ? bstrdup(js ? js : "") : NULL;
+	} else if (!*json_slot || strcmp(*json_slot, js ? js : "") != 0) {
+		obs_source_update(*slot, st);
+		bfree(*json_slot);
+		*json_slot = bstrdup(js ? js : "");
+	}
+	obs_data_release(st);
+	return *slot;
+}
+
+/* Puts the transition `t` on channel 0 (keeping what is on screen) and releases `cur`'s content. */
+static void canal_trocar(obs_source_t *t)
+{
+	obs_source_t *cur = obs_canvas_get_channel(s_canvas, 0);
+	if (cur != t) {
+		bool trcur = cur && obs_source_get_type(cur) == OBS_SOURCE_TYPE_TRANSITION;
+		if (trcur)
+			obs_transition_swap_begin(t, cur);
+		obs_canvas_set_channel(s_canvas, 0, t);
+		if (trcur) {
+			obs_transition_swap_end(t, cur);
+			if (cur == s_tr || cur == s_tr_ov)
+				obs_transition_clear(cur);
+		}
+	}
+	obs_source_release(cur);
+}
+
+/* Makes `scene` the active scene of the canvas using the transition of OBS (or the scene's override), like
+ * OBSBasic::TransitionToScene. anim=false cuts. Caller holds s_vlock with a canvas. */
+static void ativar_cena(obs_source_t *scene, bool anim)
+{
+	obs_source_t *t = NULL;
+	int dur = s_trcfg ? (int)obs_data_get_int(s_trcfg, "duracao") : DURACAO_PADRAO;
+
+	if (scene) {
+		obs_data_t *ps = obs_source_get_private_settings(scene);
+		const char *nome = obs_data_get_string(ps, "transition");
+		if (nome && *nome) {
+			obs_data_t *item = tr_item(nome);
+			if (item) {
+				t = tr_obter(&s_tr_ov, &s_tr_ov_json, item);
+				obs_data_release(item);
+				if (t) {
+					obs_data_set_default_int(ps, "transition_duration", DURACAO_PADRAO);
+					dur = (int)obs_data_get_int(ps, "transition_duration");
+				}
+			}
+		}
+		obs_data_release(ps);
+	}
+	if (!t) {
+		obs_data_t *item = tr_item(NULL);
+		if (item) {
+			t = tr_obter(&s_tr, &s_tr_json, item);
+			obs_data_release(item);
+		}
+	}
+
+	obs_source_t *atual = ativa_get();
+	bool igual = atual == scene;
+	obs_source_release(atual);
+
+	if (!t) { /* no frontend transition available: hard cut */
+		obs_canvas_set_channel(s_canvas, 0, scene);
+		ativa_set(scene);
+		return;
+	}
+
+	obs_source_t *cur = obs_canvas_get_channel(s_canvas, 0);
+	bool ja = cur == t;
+	obs_source_release(cur);
+	if (igual && ja && scene && !tr_ativa(t))
+		return;
+
+	canal_trocar(t);
+	if (anim && scene && dur > 0 && !igual && obs_transition_start(t, OBS_TRANSITION_MODE_AUTO, (uint32_t)dur, scene)) {
+		/* animating */
+	} else if (scene) {
+		obs_transition_set(t, scene);
+	} else {
+		obs_transition_clear(t);
+	}
+	ativa_set(scene);
+}
+
+/* Cancels a running transition so removed scenes are not kept alive by it (caller holds s_vlock). */
+static void tr_parar(void)
+{
+	obs_source_t *cur = obs_canvas_get_channel(s_canvas, 0);
+	if (cur && obs_source_get_type(cur) == OBS_SOURCE_TYPE_TRANSITION && tr_ativa(cur)) {
+		obs_source_t *a = ativa_get();
+		if (a)
+			obs_transition_set(cur, a);
+		else
+			obs_transition_clear(cur);
+		obs_source_release(a);
+	}
+	obs_source_release(cur);
+}
+
+/* Drops the private transitions (the canvas channel must already be cleared). */
+static void tr_liberar(obs_source_t *tr, obs_source_t *ov, char *j1, char *j2)
+{
+	if (tr) {
+		obs_transition_clear(tr);
+		obs_source_release(tr);
+	}
+	if (ov) {
+		obs_transition_clear(ov);
+		obs_source_release(ov);
+	}
+	bfree(j1);
+	bfree(j2);
 }
 
 static bool cb_primeira(void *p, obs_source_t *src)
@@ -205,9 +400,29 @@ static void ativar_primeira(void)
 	}
 	if (!src)
 		obs_canvas_enum_scenes(s_canvas, cb_primeira, &src);
-	obs_canvas_set_channel(s_canvas, 0, src);
+	ativar_cena(src, false);
 	if (src)
 		obs_source_release(src);
+}
+
+/* Hotkey "switch to scene" like OBSBasic::AddScene registers for main scenes (OBSBasic.SelectScene). */
+static void cb_hotkey_cena(void *dados, obs_hotkey_id id, obs_hotkey_t *hk, bool pressed)
+{
+	UNUSED_PARAMETER(id);
+	UNUSED_PARAMETER(hk);
+	if (!pressed)
+		return;
+	obs_source_t *src = obs_source_get_ref(dados);
+	if (!src)
+		return;
+	vertical_cena_ativar(obs_source_get_name(src));
+	obs_source_release(src);
+}
+
+static void registrar_hotkey(obs_source_t *src)
+{
+	obs_hotkey_register_source(src, "OBSBasic.SelectScene", obs_frontend_get_locale_string("Basic.Hotkeys.SelectScene"),
+				   cb_hotkey_cena, src);
 }
 
 
@@ -377,9 +592,9 @@ static void aplicar_ligacao(void)
 			obs_scene_t *sc = achar_cena(alvo);
 			if (sc) {
 				obs_source_t *src = obs_scene_get_source(sc);
-				obs_source_t *atual = obs_canvas_get_channel(s_canvas, 0);
-				if (atual != src) { /* hard cut */
-					obs_canvas_set_channel(s_canvas, 0, src);
+				obs_source_t *atual = ativa_get();
+				if (atual != src) { /* transition of OBS (or the scene's override) */
+					ativar_cena(src, true);
 					bump();
 				}
 				obs_source_release(atual);
@@ -432,6 +647,7 @@ static void montar(void)
 				obs_source_t *src = obs_load_source(it);
 				if (src) {
 					obs_source_load2(src);
+					registrar_hotkey(src);
 					obs_source_release(src);
 					carregadas++;
 				}
@@ -446,11 +662,13 @@ static void montar(void)
 
 		obs_scene_t *sc = achar_cena(obs_data_get_string(s_dados, "ativa"));
 		if (sc) {
-			obs_canvas_set_channel(c, 0, obs_scene_get_source(sc));
+			ativar_cena(obs_scene_get_source(sc), false);
 			liberar_cena(sc);
 		} else {
 			ativar_primeira();
 		}
+	} else {
+		ativar_cena(NULL, false); /* puts the transition on channel 0 */
 	}
 	if (!s_lig)
 		s_lig = obs_data_create();
@@ -461,8 +679,15 @@ static void montar(void)
 	s_snap = NULL;
 	os_atomic_set_bool(&s_disp, true);
 	bump();
+	obs_source_t *canal = obs_canvas_get_channel(c, 0);
+	char canal_info[96] = "none";
+	if (canal) {
+		snprintf(canal_info, sizeof(canal_info), "%s '%s'", obs_source_get_id(canal), obs_source_get_name(canal));
+		obs_source_release(canal);
+	}
 	pthread_mutex_unlock(&s_vlock);
 
+	obs_log(LOG_INFO, "vertical canvas channel 0: %s", canal_info);
 	obs_log(LOG_INFO, "vertical canvas created (%dx%d), %d scene(s) loaded", V_LARGURA, V_ALTURA, carregadas);
 	saidas_vertical_pronto();
 	aplicar_ligacao();
@@ -509,6 +734,11 @@ static void desmontar(bool guardar)
 	ordem_limpar();
 	obs_data_t *lig = s_lig;
 	s_lig = NULL;
+	obs_source_t *tr = s_tr, *tr_ov = s_tr_ov;
+	char *j1 = s_tr_json, *j2 = s_tr_ov_json;
+	s_tr = s_tr_ov = NULL;
+	s_tr_json = s_tr_ov_json = NULL;
+	ativa_set(NULL);
 	bump();
 	pthread_mutex_unlock(&s_vlock);
 	/* From here no request can reach the canvas (s_canvas is NULL) and `c` is owned by us. */
@@ -522,6 +752,7 @@ static void desmontar(bool guardar)
 	saidas_parar_verticais(); /* the vertical encoders use the canvas video */
 
 	obs_canvas_set_channel(c, 0, NULL);
+	tr_liberar(tr, tr_ov, j1, j2); /* the transitions hold references to the scenes */
 	struct lista_fontes cenas;
 	da_init(cenas.a);
 	obs_canvas_enum_scenes(c, cb_coletar, &cenas);
@@ -536,6 +767,46 @@ static void desmontar(bool guardar)
 	obs_log(LOG_INFO, "vertical canvas removed");
 }
 
+/* UI thread: snapshot of the frontend transitions (see the transitions block above). */
+static void transicoes_atualizar(void)
+{
+	obs_data_t *cfg = obs_data_create();
+	obs_data_array_t *lista = obs_data_array_create();
+	struct obs_frontend_source_list l = {0};
+	obs_frontend_get_transitions(&l);
+	for (size_t i = 0; i < l.sources.num; i++) {
+		obs_source_t *t = l.sources.array[i];
+		obs_data_t *it = obs_data_create();
+		obs_data_t *st = obs_source_get_settings(t);
+		obs_data_set_string(it, "id", obs_source_get_id(t));
+		obs_data_set_string(it, "name", obs_source_get_name(t));
+		obs_data_set_obj(it, "settings", st);
+		obs_data_release(st);
+		obs_data_array_push_back(lista, it);
+		obs_data_release(it);
+	}
+	obs_frontend_source_list_free(&l);
+	obs_data_set_array(cfg, "lista", lista);
+	obs_data_array_release(lista);
+	obs_source_t *cur = obs_frontend_get_current_transition();
+	if (cur) {
+		obs_data_set_string(cfg, "atual", obs_source_get_name(cur));
+		obs_source_release(cur);
+	}
+	obs_data_set_int(cfg, "duracao", obs_frontend_get_transition_duration());
+
+	pthread_mutex_lock(&s_vlock);
+	obs_data_release(s_trcfg);
+	s_trcfg = cfg;
+	pthread_mutex_unlock(&s_vlock);
+}
+
+void vertical_transicoes_atualizar(void)
+{
+	if (s_vok)
+		transicoes_atualizar();
+}
+
 void vertical_evento(enum obs_frontend_event event)
 {
 	if (!s_vok)
@@ -543,6 +814,7 @@ void vertical_evento(enum obs_frontend_event event)
 
 	switch (event) {
 	case OBS_FRONTEND_EVENT_FINISHED_LOADING:
+		transicoes_atualizar();
 		pthread_mutex_lock(&s_vlock);
 		s_pronto = true;
 		pthread_mutex_unlock(&s_vlock);
@@ -557,10 +829,17 @@ void vertical_evento(enum obs_frontend_event event)
 		pthread_mutex_unlock(&s_vlock);
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_COLLECTION_CHANGED:
+		transicoes_atualizar();
 		montar();
+		break;
+	case OBS_FRONTEND_EVENT_TRANSITION_CHANGED:
+	case OBS_FRONTEND_EVENT_TRANSITION_DURATION_CHANGED:
+	case OBS_FRONTEND_EVENT_TRANSITION_LIST_CHANGED:
+		transicoes_atualizar();
 		break;
 	case OBS_FRONTEND_EVENT_SCENE_CHANGED:
 	case OBS_FRONTEND_EVENT_TRANSITION_STOPPED:
+		transicoes_atualizar(); /* picks up edits of the transition settings too */
 		aplicar_ligacao();
 		break;
 	case OBS_FRONTEND_EVENT_SCRIPTING_SHUTDOWN: /* before the frontend clears the scene data */
@@ -596,6 +875,8 @@ void vertical_liberar(void)
 	obs_data_release(s_snap);
 	obs_data_release(s_lig);
 	s_dados = s_snap = s_lig = NULL;
+	obs_data_release(s_trcfg);
+	s_trcfg = NULL;
 	pthread_mutex_destroy(&s_vlock);
 }
 
@@ -760,11 +1041,12 @@ static const char *criar_cena(const char *nome, obs_scene_t **out)
 	if (!sc)
 		return "outro";
 	obs_source_release(obs_scene_get_source(sc)); /* the canvas (SCENE_REF) keeps the scene alive */
-	obs_source_t *atual = obs_canvas_get_channel(s_canvas, 0);
+	registrar_hotkey(obs_scene_get_source(sc));
+	obs_source_t *atual = ativa_get();
 	if (!atual) {
 		obs_scene_t *novo = achar_cena(nome);
 		if (novo) {
-			obs_canvas_set_channel(s_canvas, 0, obs_scene_get_source(novo));
+			ativar_cena(obs_scene_get_source(novo), false);
 			liberar_cena(novo);
 		}
 	}
@@ -886,11 +1168,12 @@ static bool h_cenas_remover(obs_data_t *rq, obs_data_t *rs)
 	char nome[MAX_NOME * 4 + 1];
 	snprintf(nome, sizeof(nome), "%s", obs_source_get_name(src));
 
-	obs_source_t *atual = obs_canvas_get_channel(s_canvas, 0);
+	tr_parar();
+	obs_source_t *atual = ativa_get();
 	bool era_ativa = atual == src;
 	obs_source_release(atual);
 	if (era_ativa)
-		obs_canvas_set_channel(s_canvas, 0, NULL);
+		ativar_cena(NULL, false);
 
 	struct lista_chaves chaves;
 	da_init(chaves.a);
@@ -1185,7 +1468,7 @@ static bool h_cena_ativar(obs_data_t *rq, obs_data_t *rs)
 	obs_scene_t *sc = achar_cena(obs_data_get_string(rq, "nome"));
 	if (!sc)
 		return erro(rs, "cena_inexistente");
-	obs_canvas_set_channel(s_canvas, 0, obs_scene_get_source(sc));
+	ativar_cena(obs_scene_get_source(sc), !obs_data_get_bool(rq, "cortar"));
 	liberar_cena(sc);
 	return sucesso(rs, true);
 }
@@ -1307,7 +1590,7 @@ obs_source_t *vertical_cena_ativa_ref(void)
 	obs_source_t *s = NULL;
 	pthread_mutex_lock(&s_vlock);
 	if (s_canvas)
-		s = obs_canvas_get_channel(s_canvas, 0);
+		s = ativa_get();
 	pthread_mutex_unlock(&s_vlock);
 	return s;
 }
@@ -1364,7 +1647,7 @@ size_t vertical_cenas_listar(struct vertical_cena *out, size_t max)
 	struct ctx_cenas c = {out, 0, max, NULL};
 	pthread_mutex_lock(&s_vlock);
 	if (s_canvas) {
-		c.ativa = obs_canvas_get_channel(s_canvas, 0);
+		c.ativa = ativa_get();
 		ordem_sync(s_canvas);
 		for (size_t i = 0; i < s_ordem.num; i++) {
 			obs_scene_t *sc = achar_cena(s_ordem.array[i]);
@@ -1427,12 +1710,78 @@ const char *vertical_cena_ativar(const char *nome)
 	return req_ui("vertical.cena.ativar", rq, NULL);
 }
 
+const char *vertical_cena_ativar_cortando(const char *nome)
+{
+	obs_data_t *rq = obs_data_create();
+	obs_data_set_string(rq, "nome", nome ? nome : "");
+	obs_data_set_bool(rq, "cortar", true);
+	return req_ui("vertical.cena.ativar", rq, NULL);
+}
+
 const char *vertical_cena_duplicar(const char *nome, const char *novo)
 {
 	obs_data_t *rq = obs_data_create();
 	obs_data_set_string(rq, "nome", nome ? nome : "");
 	obs_data_set_string(rq, "novo", novo ? novo : "");
 	return req_ui("vertical.cenas.duplicar", rq, NULL);
+}
+
+const char *vertical_cena_restaurar(obs_data_t *dados, int indice)
+{
+	static char ebuf[32];
+	if (!s_vok || !dados)
+		return "canvas_indisponivel";
+	const char *e = NULL;
+	pthread_mutex_lock(&s_vlock);
+	if (!s_canvas) {
+		e = "canvas_indisponivel";
+	} else {
+		const char *nome = obs_data_get_string(dados, "name");
+		obs_scene_t *ex = achar_cena(nome);
+		if (ex) {
+			liberar_cena(ex);
+			e = "nome_em_uso";
+		} else if (contar_cenas() >= MAX_CENAS) {
+			e = "limite_cenas";
+		} else {
+			obs_data_t *copia = obs_data_create_from_json(obs_data_get_json(dados));
+			obs_data_set_string(copia, "canvas_uuid", obs_canvas_get_uuid(s_canvas));
+			obs_source_t *src = obs_load_source(copia);
+			obs_data_release(copia);
+			if (!src) {
+				e = "outro";
+			} else {
+				obs_source_load2(src);
+				registrar_hotkey(src);
+				obs_source_release(src);
+				ordem_sync(s_canvas);
+				size_t atual = s_ordem.num;
+				for (size_t i = 0; i < s_ordem.num; i++)
+					if (strcmp(s_ordem.array[i], nome) == 0)
+						atual = i;
+				if (atual < s_ordem.num) {
+					long long pos = indice < 0 ? 0 : indice;
+					if (pos > (long long)s_ordem.num - 1)
+						pos = (long long)s_ordem.num - 1;
+					char *n = s_ordem.array[atual];
+					da_erase(s_ordem, atual);
+					da_insert(s_ordem, (size_t)pos, &n);
+				}
+				obs_scene_t *sc = achar_cena(nome);
+				if (sc) {
+					ativar_cena(obs_scene_get_source(sc), false);
+					liberar_cena(sc);
+				}
+				bump();
+			}
+		}
+	}
+	pthread_mutex_unlock(&s_vlock);
+	if (!e)
+		obs_frontend_save();
+	else
+		snprintf(ebuf, sizeof(ebuf), "%s", e);
+	return e ? ebuf : NULL;
 }
 
 const char *vertical_cena_mover(const char *nome, int posicao)
@@ -1532,7 +1881,7 @@ static obs_scene_t *cena_ou_ativa(const char *cena)
 {
 	if (cena && *cena)
 		return achar_cena(cena);
-	obs_source_t *a = obs_canvas_get_channel(s_canvas, 0);
+	obs_source_t *a = ativa_get();
 	if (!a)
 		return NULL;
 	obs_scene_t *sc = obs_scene_from_source(a); /* the channel reference becomes the caller's */

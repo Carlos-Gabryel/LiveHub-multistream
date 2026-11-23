@@ -71,6 +71,23 @@ recording. Scene collection backup: `F:\Backups\obs-studio-20261122-2214`.
 - Self-test (st1): Sources empty-area menu identical; item menu identical except source-dependent entries (the first item of the
   two scenes are different source types) and the Impossible entry below.
 
+### Task A+B (2026-11-22): Scenes dock + vertical transitions
+- `src/obsport/`: `LHSceneTree` (SceneTree incl. grid mode, class name kept), `LHSceneRenameDelegate`, `LHNameDialog` (OBS NameDialog),
+  `LHScenesDock` (scenes dock from OBSBasic.ui + OBSBasic_Scenes.cpp: toolbar, F2/Del shortcuts, add/duplicate/rename/remove with OBS
+  validation and Undo.* actions, order submenu, drag & drop reorder, copy/paste filters, scene screenshot, projector submenu, per-scene
+  transition override menu, grid/list toggle; LiveHub link entry is the last one), `LHProjector` (OBSProjector for a vertical scene).
+  vdocks.cpp `DockCenas` removed; dock id `livehub-vertical-cenas` kept. Grid mode is stored in its own key (`LHVerticalSceneGridMode`).
+- Engine (`vertical.c`): channel 0 of the canvas is a private transition (clone of OBS's current transition: same id/settings/duration,
+  refreshed on TRANSITION_CHANGED/DURATION_CHANGED/LIST_CHANGED and on every scene change), `vertical_cena_ativar`, the vendor request
+  `vertical.cena.ativar` and the link auto-switch use it. Per-scene override = keys `transition` / `transition_duration` of the scene's
+  private settings (same as OBS; saved with the scene). Scene hotkeys `OBSBasic.SelectScene` are registered for every vertical scene.
+  New API: `vertical_cena_ativar_cortando`, `vertical_cena_restaurar` (undo of a removal), `vertical_transicoes_atualizar`.
+- Self-test (st2): scene item/empty menus and the Order, Projector and Transition override submenus are identical to OBS's (the unordered_map
+  order of the transitions also matches); only differences are the Impossible item below and the LiveHub link entry.
+
 ## Impossible for a non-main canvas
 - "Resize output (source size)" (ResizeOutputSizeOfSource): resizes the main video/output; the vertical canvas is fixed 1080x1920.
-
+- "Show in Multiview" (scene context menu): OBS's multiview only draws main-canvas scenes; the vertical scenes cannot be added to it.
+- Scene projector: obs_frontend_open_projector cannot find canvas scenes, so `LHProjector` renders the vertical scene itself; it is not
+  saved/restored with OBS's saved projectors (OBS only stores projectors of its own scenes).
+- Settings edits of OBS's current transition (properties dialog) are picked up at the next scene event, not instantly (no frontend event).

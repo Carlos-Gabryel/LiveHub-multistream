@@ -550,7 +550,7 @@ void LHSourcesDock::UpdateEditMenu()
 	actionCopyTransform->setEnabled(canTransformSingle);
 	actionPasteTransform->setEnabled(canTransformMultiple && hasCopiedTransform && videoCount > 0);
 	actionCopyFilters->setEnabled(filter_count > 0);
-	actionPasteFilters->setEnabled(!obs_weak_source_expired(copyFiltersSource_) && totalCount > 0);
+	actionPasteFilters->setEnabled(!obs_weak_source_expired(VerticalContext::Get()->copyFiltersSource) && totalCount > 0);
 	auto pasteType = getItemPasteType();
 	actionPasteRef->setEnabled(pasteType == ItemPasteType::Reference || pasteType == ItemPasteType::Both);
 	actionPasteDup->setEnabled(pasteType == ItemPasteType::Duplicate || pasteType == ItemPasteType::Both);
